@@ -1,15 +1,17 @@
 # Standard library
-import os
 import argparse
+import os
 
 # Third party
 from rich.console import Console
 
+from wut.config import get_config
+
 # Local
 from wut.utils import (
+    explain,
     get_shell,
     get_terminal_context,
-    explain,
 )
 
 # from utils import (
@@ -46,13 +48,15 @@ def main():
                 "[bold red]wut must be run inside a tmux or screen session.[/bold red]"
             )
             return
-        if (
-            not os.environ.get("OPENAI_API_KEY", None)
-            and not os.environ.get("ANTHROPIC_API_KEY", None)
-            and not os.environ.get("OLLAMA_MODEL", None)
-        ):
+
+        # Check for valid configuration
+        config = get_config()
+        if not config.has_valid_config():
             console.print(
-                "[bold red]Please set your OpenAI or Anthropic API key in your environment variables. Or, alternatively, specify an Ollama model name.[/bold red]"
+                "[bold red]No valid LLM provider configuration found.[/bold red]\n"
+                "Please either:\n"
+                "  1. Create ~/.config/wut/config with your API keys and models, or\n"
+                "  2. Set environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_MODEL)"
             )
             return
 

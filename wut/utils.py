@@ -2,18 +2,21 @@
 import os
 import tempfile
 from collections import namedtuple
-from subprocess import check_output, run, CalledProcessError, DEVNULL
+from subprocess import DEVNULL, CalledProcessError, check_output, run
 from typing import List, Optional, Tuple
+
+from anthropic import Anthropic
 
 # Third party
 from ollama import chat
-from psutil import Process
 from openai import OpenAI
-from anthropic import Anthropic
+from psutil import Process
 from rich.markdown import Markdown
 
+from wut.config import get_config
+
 # Local
-from wut.prompts import EXPLAIN_PROMPT, ANSWER_PROMPT
+from wut.prompts import ANSWER_PROMPT, EXPLAIN_PROMPT
 
 # from prompts import EXPLAIN_PROMPT, ANSWER_PROMPT
 
@@ -230,9 +233,12 @@ def format_output(output: str) -> str:
 
 
 def run_anthropic(system_message: str, user_message: str) -> str:
-    anthropic = Anthropic()
+    config = get_config()
+    provider_config = config.get_provider_config()["anthropic"]
+
+    anthropic = Anthropic(api_key=provider_config["api_key"])
     response = anthropic.messages.create(
-        model="claude-3-5-sonnet-20241022",
+        model=provider_config["model"],
         max_tokens=1024,
         system=system_message,
         messages=[{"role": "user", "content": user_message}],
@@ -241,21 +247,29 @@ def run_anthropic(system_message: str, user_message: str) -> str:
 
 
 def run_openai(system_message: str, user_message: str) -> str:
-    openai = OpenAI(base_url=os.getenv("OPENAI_BASE_URL", None))
+    config = get_config()
+    provider_config = config.get_provider_config()["openai"]
+
+    openai = OpenAI(
+        api_key=provider_config["api_key"], base_url=provider_config["base_url"]
+    )
     response = openai.chat.completions.create(
         messages=[
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_message},
         ],
-        model=os.getenv("OPENAI_MODEL", None) or "gpt-4o",
+        model=provider_config["model"],
         temperature=0.7,
     )
     return response.choices[0].message.content
 
 
 def run_ollama(system_message: str, user_message: str) -> str:
+    config = get_config()
+    provider_config = config.get_provider_config()["ollama"]
+
     response = chat(
-        model=os.getenv("OLLAMA_MODEL", None),
+        model=provider_config["model"],
         messages=[
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_message},
@@ -265,16 +279,15 @@ def run_ollama(system_message: str, user_message: str) -> str:
 
 
 def get_llm_provider() -> str:
-    if os.getenv("OPENAI_API_KEY", None):  # Default
-        return "openai"
+    config = get_config()
+    provider = config.get_active_provider()
 
-    if os.getenv("ANTHROPIC_API_KEY", None):
-        return "anthropic"
+    if not provider:
+        raise ValueError(
+            "No valid provider configuration found. Please set up ~/.config/wut/config or environment variables."
+        )
 
-    if os.getenv("OLLAMA_MODEL", None):
-        return "ollama"
-
-    raise ValueError("No API key found for OpenAI or Anthropic.")
+    return provider
 
 
 ######

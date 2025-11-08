@@ -1,0 +1,23 @@
+# wut configuration file
+# Copy this file to ~/.config/wut/config and fill in your credentials
+
+# General settings (optional)
+[general]
+# Explicitly set which provider to use (openai, anthropic, or ollama)
+# If not set, will auto-detect based on available API keys
+# provider = openai
+
+# OpenAI configuration
+[openai]
+api_key = your-openai-api-key-here
+model = gpt-4o
+# base_url = https://api.openai.com/v1  # Optional: custom API endpoint
+
+# Anthropic configuration
+[anthropic]
+api_key = your-anthropic-api-key-here
+model = claude-3-5-sonnet-20241022
+
+# Ollama configuration (for local models)
+[ollama]
+model = llama2
