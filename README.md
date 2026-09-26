@@ -25,13 +25,13 @@ Build the binary from a clone of this repository:
 ```bash
 > git clone https://github.com/diffficult/wut.git
 > cd wut
-> go build -o ./wut-go ./cmd/wut
-> ./wut-go --help
+> go build -o wut ./cmd/wut
+> ./wut --help
 ```
 
-The binary is named `wut-go` because the repository root still contains the legacy Python package directory `wut/`, and Go refuses to write a build output over an existing directory. Once the Python sources are gone the binary can simply be called `wut`; `go install ./cmd/wut` always installs it as `wut`.
+This writes a single self-contained `wut` binary into the repository root. Move it anywhere on your `PATH`, or use `go install ./cmd/wut` below.
 
-Or install it into `$GOBIN` (which defaults to `$(go env GOPATH)/bin`) so `wut` is on your `PATH`:
+Alternatively install it into `$GOBIN` (which defaults to `$(go env GOPATH)/bin`) so `wut` is on your `PATH`:
 
 ```bash
 > go install ./cmd/wut

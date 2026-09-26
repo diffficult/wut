@@ -582,8 +582,9 @@ func TestConfigExampleAvoidsInlineComments(t *testing.T) {
 	}
 }
 
-// The build instruction must not write the binary over the Python package
-// directory that still exists in this repository.
+// The documented build output is the plain `wut` binary in the repository root:
+// the legacy Python package directory is gone, so `go build -o wut ./cmd/wut` is
+// the correct instruction and no pip/pipx install path may come back.
 func TestReadmeDocumentsAWorkingGoInstall(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
@@ -591,12 +592,12 @@ func TestReadmeDocumentsAWorkingGoInstall(t *testing.T) {
 	}
 	readme := string(contents)
 
-	for _, want := range []string{"go build -o ./wut-go ./cmd/wut", "./wut-go --help", "go install ./cmd/wut", "tmux", "screen", "--query"} {
+	for _, want := range []string{"go build -o wut ./cmd/wut", "./wut --help", "go install ./cmd/wut", "tmux", "screen", "--query"} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README.md does not document %q", want)
 		}
 	}
-	for _, unwanted := range []string{"pipx", "-o wut ", `wut "how do i`} {
+	for _, unwanted := range []string{"pipx", "pip install", "setup.py", "Pipfile", "wut-go", "Python package directory", `wut "how do i`} {
 		if strings.Contains(readme, unwanted) {
 			t.Fatalf("README.md still contains %q", unwanted)
 		}
