@@ -18,7 +18,8 @@ type harness struct {
 	app             *app
 	stdout          *bytes.Buffer
 	stderr          *bytes.Buffer
-	gotMultiplexer  []string
+	gotSources      [][]string
+	gotSource       string
 	gotContext      string
 	gotQuery        string
 	gotConfig       *config.Config
@@ -46,9 +47,14 @@ func newHarness(t *testing.T, env map[string]string, pane string, captureErr err
 		shell:      func() terminal.Shell { return terminal.Shell{Path: "/bin/bash", Name: "bash", Prompt: "$ "} },
 		getenv:     func(key string) string { return env[key] },
 		loadConfig: func() *config.Config { return cfg },
-		capture: func(multiplexer string) (string, error) {
-			h.gotMultiplexer = append(h.gotMultiplexer, multiplexer)
-			return pane, captureErr
+		capture: func(sources []string) (string, string, error) {
+			h.gotSources = append(h.gotSources, sources)
+			source := ""
+			if len(sources) > 0 {
+				source = sources[0]
+			}
+			h.gotSource = source
+			return source, pane, captureErr
 		},
 		explain: func(cfg *config.Config, context string, query string) (string, error) {
 			h.capturedContext = true
@@ -81,8 +87,8 @@ func TestRunReportsInvalidConfigBeforeCapturingThePane(t *testing.T) {
 	if code := h.app.run(nil); code != 1 {
 		t.Fatalf("run() = %d, want 1", code)
 	}
-	if len(h.gotMultiplexer) != 0 {
-		t.Fatalf("run() captured %v before validating the config", h.gotMultiplexer)
+	if len(h.gotSources) != 0 {
+		t.Fatalf("run() captured %v before validating the config", h.gotSources)
 	}
 	if h.capturedContext {
 		t.Fatal("run() called the provider without a configured provider")
@@ -173,8 +179,8 @@ func TestRunOutsideMultiplexer(t *testing.T) {
 	if code := h.app.run(nil); code != 1 {
 		t.Fatalf("run() = %d, want 1", code)
 	}
-	if len(h.gotMultiplexer) != 0 {
-		t.Fatalf("capture was invoked %v, want no capture outside a multiplexer", h.gotMultiplexer)
+	if len(h.gotSources) != 0 {
+		t.Fatalf("capture was invoked %v, want no capture outside a multiplexer or kitty", h.gotSources)
 	}
 	if !strings.Contains(h.stderr.String(), "must be run inside a tmux or screen session") {
 		t.Fatalf("stderr = %q, want the tmux/screen requirement", h.stderr.String())
@@ -182,10 +188,10 @@ func TestRunOutsideMultiplexer(t *testing.T) {
 }
 
 func TestRunEmptyEnvironmentValuesCountAsUnset(t *testing.T) {
-	h := newHarness(t, map[string]string{"TMUX": "", "STY": ""}, samplePane, nil, nil)
+	h := newHarness(t, map[string]string{"TMUX": "", "STY": "", "KITTY_WINDOW_ID": ""}, samplePane, nil, nil)
 
 	if code := h.app.run(nil); code != 1 {
-		t.Fatalf("run() = %d, want 1 for empty TMUX/STY", code)
+		t.Fatalf("run() = %d, want 1 for empty TMUX/STY/KITTY_WINDOW_ID", code)
 	}
 }
 
@@ -195,8 +201,8 @@ func TestRunInsideTmuxSucceeds(t *testing.T) {
 	if code := h.app.run(nil); code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
 	}
-	if strings.Join(h.gotMultiplexer, ",") != "tmux" {
-		t.Fatalf("capture saw %v, want [tmux]", h.gotMultiplexer)
+	if got := strings.Join(h.gotSources[0], ","); got != "tmux" {
+		t.Fatalf("capture saw %v, want [tmux]", h.gotSources[0])
 	}
 	if !strings.Contains(h.stdout.String(), "the answer") {
 		t.Fatalf("stdout = %q, want the provider response", h.stdout.String())
@@ -209,8 +215,8 @@ func TestRunInsideScreenUsesScreenCapture(t *testing.T) {
 	if code := h.app.run(nil); code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
 	}
-	if strings.Join(h.gotMultiplexer, ",") != "screen" {
-		t.Fatalf("capture saw %v, want [screen]", h.gotMultiplexer)
+	if got := strings.Join(h.gotSources[0], ","); got != "screen" {
+		t.Fatalf("capture saw %v, want [screen]", h.gotSources[0])
 	}
 }
 
@@ -222,8 +228,84 @@ func TestRunPrefersTmuxOverScreen(t *testing.T) {
 	if code := h.app.run(nil); code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
-	if strings.Join(h.gotMultiplexer, ",") != "tmux" {
-		t.Fatalf("capture saw %v, want [tmux]", h.gotMultiplexer)
+	if got := strings.Join(h.gotSources[0], ","); got != "tmux,screen" {
+		t.Fatalf("capture candidates = %q, want [tmux screen] with tmux first", got)
+	}
+	if h.gotSource != "tmux" {
+		t.Fatalf("selected source = %q, want tmux", h.gotSource)
+	}
+}
+
+// Kitty is the third candidate: with no multiplexer present, the window id
+// alone makes it a usable source.
+func TestRunInsideKittyUsesTheKittyCapture(t *testing.T) {
+	h := newHarness(t, map[string]string{"KITTY_WINDOW_ID": "7"}, samplePane, nil, nil)
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if got := strings.Join(h.gotSources[0], ","); got != "kitty" {
+		t.Fatalf("capture candidates = %q, want [kitty]", got)
+	}
+	if h.gotSource != "kitty" {
+		t.Fatalf("selected source = %q, want kitty", h.gotSource)
+	}
+	if !h.capturedContext {
+		t.Fatal("run() did not ask the provider for an answer")
+	}
+	// Kitty returns plain text, so the same prompt-aware parser applies.
+	if !strings.Contains(h.gotContext, "<last_command>") || !strings.Contains(h.gotContext, "$  cat foo") {
+		t.Fatalf("context = %q, want the last command parsed from the kitty text", h.gotContext)
+	}
+	if strings.Contains(h.gotContext, "wut") {
+		t.Fatalf("context = %q, must not include the current wut invocation", h.gotContext)
+	}
+}
+
+// tmux still wins inside a kitty-in-tmux session; the later candidates stay in
+// the list only as fallbacks.
+func TestRunPrefersTmuxAndKeepsKittyAsLastCandidate(t *testing.T) {
+	env := tmuxEnv()
+	env["STY"] = "1234.pts-0.host"
+	env["KITTY_WINDOW_ID"] = "7"
+	h := newHarness(t, env, samplePane, nil, nil)
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if got := strings.Join(h.gotSources[0], ","); got != "tmux,screen,kitty" {
+		t.Fatalf("capture candidates = %q, want [tmux screen kitty]", got)
+	}
+	if h.gotSource != "tmux" {
+		t.Fatalf("selected source = %q, want tmux", h.gotSource)
+	}
+}
+
+func TestRunDebugReportsTheSelectedCaptureSource(t *testing.T) {
+	h := newHarness(t, map[string]string{"STY": "1234.pts-0.host"}, samplePane, nil, nil)
+
+	if code := h.app.run([]string{"--debug"}); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "Captured terminal context from screen") {
+		t.Fatalf("stdout = %q, want the selected capture source reported", h.stdout.String())
+	}
+}
+
+func TestRunKittyCaptureFailureExplainsTheSetup(t *testing.T) {
+	h := newHarness(t, map[string]string{"KITTY_WINDOW_ID": "7"}, "", terminal.ErrKittyRemoteControl, nil)
+
+	if code := h.app.run(nil); code != 1 {
+		t.Fatalf("run() = %d, want 1", code)
+	}
+	if h.capturedContext {
+		t.Fatal("run() called the provider after a failed kitty capture")
+	}
+	if !strings.Contains(h.stderr.String(), "kitty") {
+		t.Fatalf("stderr = %q, want the capture source named", h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), terminal.KittySetupDocsURL) {
+		t.Fatalf("stderr = %q, want a link to the kitty setup docs", h.stderr.String())
 	}
 }
 
@@ -272,7 +354,7 @@ func TestRunCaptureErrorExitsWithContext(t *testing.T) {
 	if code := h.app.run(nil); code != 1 {
 		t.Fatalf("run() = %d, want 1", code)
 	}
-	if !strings.Contains(h.stderr.String(), "capturing tmux pane") {
+	if !strings.Contains(h.stderr.String(), "capturing the terminal from tmux") {
 		t.Fatalf("stderr = %q, want the capture context", h.stderr.String())
 	}
 	if !strings.Contains(h.stderr.String(), terminal.ErrNoPaneOutput.Error()) {
@@ -356,8 +438,8 @@ func TestRunHelpPrintsUsageAndExitsZero(t *testing.T) {
 	if !strings.Contains(h.stdout.String(), "Usage:") {
 		t.Fatalf("stdout = %q, want usage", h.stdout.String())
 	}
-	if len(h.gotMultiplexer) != 0 {
-		t.Fatalf("--help captured the pane: %v", h.gotMultiplexer)
+	if len(h.gotSources) != 0 {
+		t.Fatalf("--help captured the pane: %v", h.gotSources)
 	}
 }
 
@@ -592,7 +674,7 @@ func TestReadmeDocumentsAWorkingGoInstall(t *testing.T) {
 	}
 	readme := string(contents)
 
-	for _, want := range []string{"go build -o wut ./cmd/wut", "./wut --help", "go install ./cmd/wut", "tmux", "screen", "--query"} {
+	for _, want := range []string{"go build -o wut ./cmd/wut", "./wut --help", "go install ./cmd/wut", "tmux", "screen", "--query", "KITTY_WINDOW_ID", "kitten", "get-text", "allow_remote_control"} {
 		if !strings.Contains(readme, want) {
 			t.Fatalf("README.md does not document %q", want)
 		}
@@ -601,6 +683,24 @@ func TestReadmeDocumentsAWorkingGoInstall(t *testing.T) {
 		if strings.Contains(readme, unwanted) {
 			t.Fatalf("README.md still contains %q", unwanted)
 		}
+	}
+}
+
+func TestReadmeNeverSuggestsEnablingKittyRemoteControlWholesale(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+
+	for number, raw := range strings.Split(string(contents), "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if !strings.HasPrefix(trimmed, "allow_remote_control") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "allow_remote_control no") {
+			continue // Documenting the safe default is required.
+		}
+		t.Fatalf("README.md line %d = %q, want the narrow permission_only guidance, not a broad allow_remote_control yes", number+1, raw)
 	}
 }
 
@@ -629,6 +729,9 @@ func TestUsageMentionsTheMultiplexerRequirement(t *testing.T) {
 	if !strings.Contains(usage, "tmux") || !strings.Contains(usage, "screen") {
 		t.Fatalf("usage does not mention the tmux/screen requirement: %s", usage)
 	}
+	if !strings.Contains(strings.ToLower(usage), "kitty") {
+		t.Fatalf("usage does not mention the kitty fallback: %s", usage)
+	}
 }
 
 type recordingRunner struct {
@@ -646,9 +749,12 @@ func (r *recordingRunner) RunToFile(_ string, _ []string, outPath string) error 
 
 func TestCapturePaneReturnsCapturedContent(t *testing.T) {
 	runner := &recordingRunner{content: samplePane}
-	pane, err := capturePane("tmux", runner)
+	source, pane, err := capturePane([]string{terminal.MultiplexerTmux}, emptyEnv, runner)
 	if err != nil {
 		t.Fatalf("capturePane() error = %v", err)
+	}
+	if source != terminal.MultiplexerTmux {
+		t.Fatalf("capturePane() source = %q, want tmux", source)
 	}
 	if pane != samplePane {
 		t.Fatalf("capturePane() = %q, want the captured pane", pane)
@@ -657,7 +763,7 @@ func TestCapturePaneReturnsCapturedContent(t *testing.T) {
 
 func TestCapturePaneRemovesTheTemporaryFile(t *testing.T) {
 	runner := &recordingRunner{content: samplePane}
-	if _, err := capturePane("tmux", runner); err != nil {
+	if _, _, err := capturePane([]string{terminal.MultiplexerTmux}, emptyEnv, runner); err != nil {
 		t.Fatalf("capturePane() error = %v", err)
 	}
 	if runner.outPath == "" {
@@ -666,6 +772,82 @@ func TestCapturePaneRemovesTheTemporaryFile(t *testing.T) {
 	if _, err := os.Stat(runner.outPath); !os.IsNotExist(err) {
 		t.Fatalf("temporary capture file %q still exists", runner.outPath)
 	}
+}
+
+// The kitty answer can hold the whole scrollback, so nothing unbounded is
+// written to disk: the fallback needs no capture file at all.
+func TestCapturePaneWithoutAMultiplexerUsesNoTemporaryFile(t *testing.T) {
+	runner := &kittyRecordingRunner{text: samplePane}
+
+	source, pane, err := capturePane([]string{terminal.MultiplexerKitty}, func(key string) string {
+		if key == terminal.KittyWindowIDEnv {
+			return "7"
+		}
+		return ""
+	}, runner)
+	if err != nil {
+		t.Fatalf("capturePane() error = %v", err)
+	}
+	if source != terminal.MultiplexerKitty {
+		t.Fatalf("capturePane() source = %q, want kitty", source)
+	}
+	if pane != samplePane {
+		t.Fatalf("capturePane() = %q, want the kitty text", pane)
+	}
+	if runner.toFile != 0 {
+		t.Fatalf("capturePane() wrote %d capture files for kitty, want none", runner.toFile)
+	}
+}
+
+// A stale TMUX must not end the run when kitty is available.
+func TestCapturePaneFallsThroughToKittyWhenTmuxFails(t *testing.T) {
+	runner := &failingRunnerKitty{}
+
+	source, pane, err := capturePane(
+		[]string{terminal.MultiplexerTmux, terminal.MultiplexerKitty},
+		func(key string) string {
+			if key == terminal.KittyWindowIDEnv {
+				return "7"
+			}
+			return "x"
+		},
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("capturePane() error = %v", err)
+	}
+	if source != terminal.MultiplexerKitty {
+		t.Fatalf("capturePane() source = %q, want kitty after a failed tmux capture", source)
+	}
+	if pane != "kitty text\n" {
+		t.Fatalf("capturePane() = %q, want the kitty text", pane)
+	}
+}
+
+// emptyEnv is an environment that names no capture source.
+func emptyEnv(string) string { return "" }
+
+// kittyRecordingRunner answers kitten with text and refuses any file write, so a
+// capture file for the kitty fallback shows up as a failure.
+type kittyRecordingRunner struct {
+	text   string
+	toFile int
+}
+
+func (r *kittyRecordingRunner) Output(string, []string) (string, error) { return r.text, nil }
+
+func (r *kittyRecordingRunner) RunToFile(string, []string, string) error {
+	r.toFile++
+	return errors.New("no capture file expected")
+}
+
+// failingRunnerKitty fails the multiplexer hardcopy and answers kitten.
+type failingRunnerKitty struct{}
+
+func (failingRunnerKitty) Output(string, []string) (string, error) { return "kitty text\n", nil }
+
+func (failingRunnerKitty) RunToFile(string, []string, string) error {
+	return errors.New("no server running")
 }
 
 // GNU screen resolves a relative hardcopy path against its own working
@@ -694,7 +876,7 @@ func TestCaptureDirIsAbsoluteByDefault(t *testing.T) {
 
 func TestCapturePaneUsesAnAbsoluteTemporaryPath(t *testing.T) {
 	runner := &recordingRunner{content: samplePane}
-	if _, err := capturePane("screen", runner); err != nil {
+	if _, _, err := capturePane([]string{terminal.MultiplexerScreen}, emptyEnv, runner); err != nil {
 		t.Fatalf("capturePane() error = %v", err)
 	}
 	if !filepath.IsAbs(runner.outPath) {
@@ -706,7 +888,7 @@ func TestCapturePaneReportsTempFileFailure(t *testing.T) {
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 
 	runner := &recordingRunner{content: samplePane}
-	_, err := capturePane("tmux", runner)
+	_, _, err := capturePane([]string{terminal.MultiplexerTmux}, emptyEnv, runner)
 	if err == nil {
 		t.Fatal("capturePane() error = nil, want a temp file failure")
 	}
@@ -716,7 +898,7 @@ func TestCapturePaneReportsTempFileFailure(t *testing.T) {
 }
 
 func TestCapturePanePropagatesRunnerFailure(t *testing.T) {
-	_, err := capturePane("tmux", failingRunner{})
+	_, _, err := capturePane([]string{terminal.MultiplexerTmux}, emptyEnv, failingRunner{})
 	if err == nil {
 		t.Fatal("capturePane() error = nil, want the runner failure")
 	}

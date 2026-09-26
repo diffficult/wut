@@ -15,7 +15,7 @@ Just type `wut` and an LLM will help you understand whatever's in your terminal.
 
 ## Requirements
 
-- **A terminal multiplexer: `wut` must be run inside a `tmux` or GNU `screen` session.** It reads the visible pane to recover what you just ran. Running it in a plain terminal prints `wut must be run inside a tmux or screen session.` and exits.
+- **A terminal multiplexer: `wut` reads the active `tmux` or GNU `screen` pane. Outside one it prints `wut must be run inside a tmux or screen session, or in a Kitty window.` and exits.** See [Kitty fallback (optional)](#kitty-fallback-optional) for the third, optional capture source.
 - **Go 1.22 or newer** to build the binary. No Python is needed at runtime or at build time.
 
 ## Installation
@@ -44,7 +44,7 @@ Alternatively install it into `$GOBIN` (which defaults to `$(go env GOPATH)/bin`
 
 ## Usage
 
-`wut` must be used inside a `tmux` or `screen` session to capture the last command's output. To use it, just type `wut` after running a command:
+`wut` must be used inside a `tmux` or `screen` session to capture the last command's output. It also works directly in a [Kitty window](#kitty-fallback-optional) when no multiplexer is present. To use it, just type `wut` after running a command:
 
 ```bash
 > git create-pr
@@ -78,7 +78,51 @@ All flags are long-form, and there are no other input modes: `wut` never reads s
 | `--debug` | Print debug information: the detected shell, the captured terminal context, and the selected provider. |
 | `--help` | Print the usage text. |
 
-Exit codes: `0` on success, `1` on a runtime failure (no tmux/screen session, no configuration, failed capture, provider error), `2` on a usage error.
+Exit codes: `0` on success, `1` on a runtime failure (no capture source, no configuration, failed capture, provider error), `2` on a usage error.
+
+### Capture sources
+
+`wut` tries the sources it finds in the environment, in this order, and stops at the first one that returns text:
+
+1. `tmux`, when `TMUX` is set — `tmux capture-pane -p -S -`.
+2. GNU `screen`, when `STY` is set — `screen -X hardcopy -h <file>`.
+3. Kitty, when `KITTY_WINDOW_ID` is set — `kitten @ get-text --match id:<KITTY_WINDOW_ID> --extent=all`.
+
+A successful `tmux` or `screen` capture never invokes Kitty. A stale multiplexer (a `TMUX`/`STY` value left over from a session that is gone) is not fatal: if its capture fails, `wut` continues with the next available source. With `KITTY_WINDOW_ID` unset, Kitty is never invoked at all — `wut` never targets an unspecified or a different window.
+
+Kitty answers with the whole scrollback, so only the newest 256 KiB are kept in memory and used to build the terminal context. That text is plain text, so the same command/prompt parser handles it, and the existing 10k character LLM context cap still applies.
+
+### Kitty fallback (optional)
+
+This is a fallback, not a replacement: `tmux` and `screen` are tried first and behave exactly as before.
+
+How it works, and what it deliberately does not do:
+
+- `wut` reads the current window with `kitten @ get-text --match id:$KITTY_WINDOW_ID --extent=all`. The window id comes from Kitty itself, so `wut` only ever reads the window you are typing in. A missing or non-numeric id is rejected before any command runs.
+- Kitty's [remote control](https://sw.kovidgoyal.net/kitty/remote-control/) is **disabled by default**, and `wut` never changes that: it does not edit your `kitty.conf` and it will not enable permissions for you. Without access, the run fails with the message below instead of reading some other window.
+- Only `get-text` is ever requested. Grant the narrowest permission that makes that one command work, not a blanket `allow_remote_control yes` in your `kitty.conf`. Kitty's config syntax for scoped permissions has changed between releases, so check the [remote control docs](https://sw.kovidgoyal.net/kitty/remote-control/) for your version and confirm the syntax with `kitten @ --help` before relying on it. If your Kitty release only offers the all-or-nothing switch, enabling it is your decision to make explicitly in `kitty.conf`; `wut` only reports the consequence when it is missing.
+- Only the newest 256 KiB of the answer is kept in memory. The full scrollback is never written to a temporary file.
+
+Check whether `kitten` can reach the running instance at all:
+
+```bash
+> kitten @ get-text --match id:$KITTY_WINDOW_ID --extent=all | head
+```
+
+If that prints your recent window text, `wut` reads exactly the same text:
+
+```bash
+> echo "wut now works in plain kitty" && wut
+```
+
+If the permission is missing, `wut` says so instead of guessing:
+
+```
+wut: capturing the terminal from kitty: terminal: no usable capture source: kitty capture failed:
+`kitten` may be missing, or kitty remote control is disabled by default because the narrow
+get-text-only permission was never granted; the window is selected with KITTY_WINDOW_ID,
+see https://github.com/diffficult/wut#kitty-fallback-optional
+```
 
 ### How the answer is printed
 

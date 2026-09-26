@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeRunner records invocations and returns canned results, so every capture
@@ -162,6 +163,321 @@ func TestCapturePanePropagatesRunnerError(t *testing.T) {
 func TestCapturePaneRejectsNilRunner(t *testing.T) {
 	if _, err := CapturePane(MultiplexerTmux, filepath.Join(t.TempDir(), "capture"), nil); err == nil {
 		t.Fatal("CapturePane(nil runner) error = nil, want an error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Kitty fallback: third candidate, after tmux and screen.
+// ---------------------------------------------------------------------------
+
+// sourceRunner answers per-command-name results and records every invocation,
+// so candidate order and fall-through are observable without a live multiplexer
+// or a live Kitty instance.
+type sourceRunner struct {
+	outputs map[string]string
+	errs    map[string]error
+	names   []string
+	argvs   []string
+	toFile  int
+}
+
+func (r *sourceRunner) record(name string, args []string) {
+	r.names = append(r.names, name)
+	r.argvs = append(r.argvs, strings.Join(args, "\x00"))
+}
+
+func (r *sourceRunner) Output(name string, args []string) (string, error) {
+	r.record(name, args)
+	if err, ok := r.errs[name]; ok {
+		return "", err
+	}
+	return r.outputs[name], nil
+}
+
+func (r *sourceRunner) RunToFile(name string, args []string, outPath string) error {
+	r.toFile++
+	if err, ok := r.errs[name]; ok {
+		return err
+	}
+	return os.WriteFile(outPath, []byte(r.outputs[name]), 0o600)
+}
+
+func (r *sourceRunner) invoked(name string) bool {
+	for _, called := range r.names {
+		if called == name {
+			return true
+		}
+	}
+	return false
+}
+
+func kittyEnv(id string) map[string]string {
+	return map[string]string{"KITTY_WINDOW_ID": id}
+}
+
+func TestCaptureCandidatesOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want []string
+	}{
+		{"tmux only", map[string]string{"TMUX": "/tmp/tmux-0/default,1,0"}, []string{MultiplexerTmux}},
+		{"screen only", map[string]string{"STY": "1.pts-0.host"}, []string{MultiplexerScreen}},
+		{"kitty only", map[string]string{"KITTY_WINDOW_ID": "7"}, []string{MultiplexerKitty}},
+		{
+			"tmux wins, kitty last",
+			map[string]string{"TMUX": "/tmp/tmux-0/default,1,0", "STY": "1.pts-0.host", "KITTY_WINDOW_ID": "7"},
+			[]string{MultiplexerTmux, MultiplexerScreen, MultiplexerKitty},
+		},
+		{
+			"screen before kitty",
+			map[string]string{"STY": "1.pts-0.host", "KITTY_WINDOW_ID": "7"},
+			[]string{MultiplexerScreen, MultiplexerKitty},
+		},
+		{"nothing", map[string]string{}, nil},
+		{"empty values count as unset", map[string]string{"TMUX": "", "STY": "", "KITTY_WINDOW_ID": ""}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CaptureCandidates(func(key string) string { return tt.env[key] })
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Fatalf("CaptureCandidates() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKittyTextCommandTargetsOnlyTheCurrentWindow(t *testing.T) {
+	name, args, err := KittyTextCommand("7")
+	if err != nil {
+		t.Fatalf("KittyTextCommand() error = %v", err)
+	}
+	if name != "kitten" {
+		t.Fatalf("KittyTextCommand() name = %q, want kitten", name)
+	}
+	want := []string{"@", "get-text", "--match", "id:7", "--extent=all"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("KittyTextCommand() args = %q, want %q", args, want)
+	}
+}
+
+func TestKittyTextCommandRejectsAnUnspecifiedWindow(t *testing.T) {
+	for _, id := range []string{"", "   ", "all", "id:1", "../../etc", "7 8"} {
+		if _, _, err := KittyTextCommand(id); !errors.Is(err, ErrKittyWindowID) {
+			t.Fatalf("KittyTextCommand(%q) error = %v, want ErrKittyWindowID", id, err)
+		}
+	}
+}
+
+func TestCaptureKittyKeepsABoundedTailWithoutATempFile(t *testing.T) {
+	old := strings.Repeat("old output line\n", 40_000) // ~640 KiB of scrollback.
+	tail := "user@host:~$ ls\nfile.txt\n"
+	runner := &sourceRunner{outputs: map[string]string{"kitten": old + tail}}
+
+	got, err := CaptureKitty("7", runner)
+	if err != nil {
+		t.Fatalf("CaptureKitty() error = %v", err)
+	}
+	if !strings.HasSuffix(got, tail) {
+		t.Fatalf("CaptureKitty() = %q..., want the newest output kept at the end", got[len(got)-40:])
+	}
+	if len(got) != KittyMaxCaptureBytes {
+		t.Fatalf("CaptureKitty() kept %d bytes, want the %d byte bound", len(got), KittyMaxCaptureBytes)
+	}
+	if runner.toFile != 0 {
+		t.Fatalf("CaptureKitty() wrote %d capture files, want none for the unbounded kitty response", runner.toFile)
+	}
+}
+
+func TestCaptureKittyKeepsShortOutputUnchanged(t *testing.T) {
+	runner := &sourceRunner{outputs: map[string]string{"kitten": "user@host:~$ ls\nfile.txt\n"}}
+
+	got, err := CaptureKitty("7", runner)
+	if err != nil {
+		t.Fatalf("CaptureKitty() error = %v", err)
+	}
+	if got != "user@host:~$ ls\nfile.txt\n" {
+		t.Fatalf("CaptureKitty() = %q", got)
+	}
+}
+
+func TestCaptureKittyEmptyTextIsAnError(t *testing.T) {
+	runner := &sourceRunner{outputs: map[string]string{"kitten": "  \n\n"}}
+
+	if _, err := CaptureKitty("7", runner); !errors.Is(err, ErrNoPaneOutput) {
+		t.Fatalf("CaptureKitty() error = %v, want ErrNoPaneOutput", err)
+	}
+}
+
+func TestCaptureKittyFailureExplainsThePermissionSetup(t *testing.T) {
+	runner := &sourceRunner{errs: map[string]error{"kitten": errors.New("kitty is not running")}}
+
+	_, err := CaptureKitty("7", runner)
+	if !errors.Is(err, ErrKittyRemoteControl) {
+		t.Fatalf("CaptureKitty() error = %v, want ErrKittyRemoteControl", err)
+	}
+	for _, want := range []string{"kitten", "kitty", "remote control", "get-text", "KITTY_WINDOW_ID", KittySetupDocsURL} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Fatalf("CaptureKitty() error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestCaptureKittyRejectsNilRunner(t *testing.T) {
+	if _, err := CaptureKitty("7", nil); !errors.Is(err, ErrNoRunner) {
+		t.Fatalf("CaptureKitty(nil) error = %v, want ErrNoRunner", err)
+	}
+}
+
+func TestCapturePaneFromSourcesStopsAtTheFirstSuccess(t *testing.T) {
+	env := map[string]string{"TMUX": "/tmp/tmux-0/default,1,0", "STY": "1.pts-0.host", "KITTY_WINDOW_ID": "7"}
+	runner := &sourceRunner{outputs: map[string]string{"tmux": "pane text\n", "screen": "screen text\n", "kitten": "kitty text\n"}}
+
+	source, text, err := CapturePaneFromSources(
+		CaptureCandidates(func(key string) string { return env[key] }),
+		func(key string) string { return env[key] },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("CapturePaneFromSources() error = %v", err)
+	}
+	if source != MultiplexerTmux || text != "pane text\n" {
+		t.Fatalf("CapturePaneFromSources() = (%q, %q), want the tmux capture", source, text)
+	}
+	if runner.invoked("kitten") {
+		t.Fatalf("runner saw %q, want no kitty invocation after a successful tmux capture", runner.names)
+	}
+}
+
+func TestCapturePaneFromSourcesFallsThroughAStaleMultiplexer(t *testing.T) {
+	env := map[string]string{"TMUX": "/tmp/tmux-0/default,1,0", "KITTY_WINDOW_ID": "7"}
+	runner := &sourceRunner{
+		outputs: map[string]string{"kitten": "kitty text\n"},
+		errs:    map[string]error{"tmux": errors.New("no server running")},
+	}
+
+	source, text, err := CapturePaneFromSources(
+		CaptureCandidates(func(key string) string { return env[key] }),
+		func(key string) string { return env[key] },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("CapturePaneFromSources() error = %v", err)
+	}
+	if source != MultiplexerKitty || text != "kitty text\n" {
+		t.Fatalf("CapturePaneFromSources() = (%q, %q), want the kitty capture", source, text)
+	}
+}
+
+func TestCapturePaneFromSourcesFallsThroughAnEmptyMultiplexerCapture(t *testing.T) {
+	env := map[string]string{"STY": "1.pts-0.host", "KITTY_WINDOW_ID": "7"}
+	runner := &sourceRunner{
+		outputs: map[string]string{"screen": "\n \n", "kitten": "kitty text\n"},
+	}
+
+	source, _, err := CapturePaneFromSources(
+		CaptureCandidates(func(key string) string { return env[key] }),
+		func(key string) string { return env[key] },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("CapturePaneFromSources() error = %v", err)
+	}
+	if source != MultiplexerKitty {
+		t.Fatalf("CapturePaneFromSources() = %q, want kitty after an empty screen capture", source)
+	}
+}
+
+func TestCapturePaneFromSourcesUsesKittyWhenNoMultiplexerIsPresent(t *testing.T) {
+	runner := &sourceRunner{outputs: map[string]string{"kitten": "kitty text\n"}}
+
+	source, text, err := CapturePaneFromSources(
+		CaptureCandidates(func(key string) string { return kittyEnv("7")[key] }),
+		func(key string) string { return kittyEnv("7")[key] },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("CapturePaneFromSources() error = %v", err)
+	}
+	if source != MultiplexerKitty || text != "kitty text\n" {
+		t.Fatalf("CapturePaneFromSources() = (%q, %q), want the kitty capture", source, text)
+	}
+	if runner.toFile != 0 {
+		t.Fatalf("CapturePaneFromSources() wrote %d capture files, want none for kitty", runner.toFile)
+	}
+}
+
+// Without a window id there is nothing to target: kitty must not be invoked, and
+// the run must fail instead of guessing a window.
+func TestCapturePaneFromSourcesNeverInvokesKittyWithoutAnID(t *testing.T) {
+	runner := &sourceRunner{outputs: map[string]string{"kitten": "kitty text\n"}}
+
+	_, _, err := CapturePaneFromSources(
+		[]string{MultiplexerKitty},
+		func(string) string { return "" },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err == nil {
+		t.Fatal("CapturePaneFromSources() error = nil, want a failure without a kitty window id")
+	}
+	if runner.invoked("kitten") {
+		t.Fatalf("runner saw %q, want no kitty invocation without KITTY_WINDOW_ID", runner.names)
+	}
+}
+
+func TestCapturePaneFromSourcesWithoutCandidatesRunsNothing(t *testing.T) {
+	runner := &sourceRunner{}
+
+	_, _, err := CapturePaneFromSources(nil, func(string) string { return "" }, filepath.Join(t.TempDir(), "capture"), runner)
+	if !errors.Is(err, ErrNoMultiplexer) {
+		t.Fatalf("CapturePaneFromSources() error = %v, want ErrNoMultiplexer", err)
+	}
+	if len(runner.names) != 0 {
+		t.Fatalf("runner saw %q, want no command without a candidate", runner.names)
+	}
+}
+
+func TestCapturePaneFromSourcesReportsEveryFailure(t *testing.T) {
+	env := map[string]string{"TMUX": "x", "STY": "y", "KITTY_WINDOW_ID": "7"}
+	runner := &sourceRunner{
+		errs: map[string]error{
+			"tmux":   errors.New("no server running"),
+			"screen": errors.New("no screen session"),
+			"kitten": errors.New("kitty is not running"),
+		},
+	}
+
+	_, _, err := CapturePaneFromSources(
+		CaptureCandidates(func(key string) string { return env[key] }),
+		func(key string) string { return env[key] },
+		filepath.Join(t.TempDir(), "capture"),
+		runner,
+	)
+	if err == nil {
+		t.Fatal("CapturePaneFromSources() error = nil, want every failure reported")
+	}
+	for _, want := range []string{"tmux", "screen", "kitty", KittySetupDocsURL} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Fatalf("CapturePaneFromSources() error = %v, want it to mention %q", err, want)
+		}
+	}
+}
+
+func TestBoundedTailIsRuneSafe(t *testing.T) {
+	// Each emoji is four bytes, so a byte-sliced tail would split one.
+	text := strings.Repeat("🙂", 100) + "tail"
+	got := BoundedTail(text, 10)
+	if !utf8.ValidString(got) {
+		t.Fatalf("BoundedTail() = %q, want valid UTF-8", got)
+	}
+	if !strings.HasSuffix(got, "tail") {
+		t.Fatalf("BoundedTail() = %q, want the newest text kept", got)
 	}
 }
 

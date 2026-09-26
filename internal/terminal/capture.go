@@ -1,5 +1,5 @@
-// Package terminal captures the active tmux or GNU screen pane and extracts
-// shell-aware command context from it.
+// Package terminal captures the active tmux or GNU screen pane, falling back to
+// the current Kitty window, and extracts shell-aware command context from it.
 package terminal
 
 import (
@@ -10,12 +10,30 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
-// Supported terminal multiplexers.
+// Supported capture sources, in preference order.
 const (
 	MultiplexerTmux   = "tmux"
 	MultiplexerScreen = "screen"
+	MultiplexerKitty  = "kitty"
+)
+
+// Kitty configuration.
+const (
+	// KittyWindowIDEnv names the environment variable Kitty sets for the window
+	// wut is running in. It is the only window wut ever targets.
+	KittyWindowIDEnv = "KITTY_WINDOW_ID"
+	// KittyMaxCaptureBytes bounds the retained Kitty text. `kitten @ get-text
+	// --extent=all` answers with the whole scrollback, which grows without
+	// limit, so only the newest tail is kept in memory and nothing unbounded is
+	// ever written to a temporary file.
+	KittyMaxCaptureBytes = 256 << 10
+	// KittySetupDocsURL points at the documented, least-privilege setup: kitty
+	// remote control stays disabled by default and only a get-text permission
+	// is granted.
+	KittySetupDocsURL = "https://github.com/diffficult/wut#kitty-fallback-optional"
 )
 
 // Shells whose prompt can be resolved.
@@ -36,6 +54,13 @@ var (
 	ErrNoRunner               = errors.New("terminal: nil command runner")
 	ErrNoPaneOutput           = errors.New("no output captured from the pane")
 	ErrNoProcessTable         = errors.New("no process table available")
+	// ErrKittyWindowID reports a missing or non-numeric Kitty window id. wut
+	// never targets an unspecified or guessed window.
+	ErrKittyWindowID = errors.New("kitty capture needs the window id from KITTY_WINDOW_ID")
+	// ErrKittyRemoteControl reports a failed kitty capture. It almost always
+	// means `kitten` is missing or Kitty's remote control refuses the request
+	// because the get-text permission was never granted.
+	ErrKittyRemoteControl = errors.New("kitty capture failed: `kitten` may be missing, or kitty remote control is disabled by default because the narrow get-text-only permission was never granted; the window is selected with KITTY_WINDOW_ID, see " + KittySetupDocsURL)
 )
 
 // Runner executes external commands. Output captures stdout as a string;
@@ -162,7 +187,8 @@ func (p psProcessTree) name(pid int) string { return p.table.Name(pid) }
 func (p psProcessTree) parent(pid int) (int, bool) { return p.table.Parent(pid) }
 
 // DetectMultiplexer reports the multiplexer hosting the current session, or an
-// empty string when neither TMUX nor STY is set.
+// empty string when neither TMUX nor STY is set. Kitty is not a multiplexer, so
+// it is not reported here; use CaptureCandidates for the full order.
 func DetectMultiplexer(getenv func(string) string) string {
 	if getenv("TMUX") != "" {
 		return MultiplexerTmux
@@ -173,6 +199,137 @@ func DetectMultiplexer(getenv func(string) string) string {
 	return ""
 }
 
+// CaptureCandidates lists the capture sources available in the environment, in
+// preference order: tmux, then GNU screen, then the current Kitty window. A
+// source is listed only when the environment names it, so Kitty is never
+// invoked without a window id.
+func CaptureCandidates(getenv func(string) string) []string {
+	var sources []string
+	if getenv("TMUX") != "" {
+		sources = append(sources, MultiplexerTmux)
+	}
+	if getenv("STY") != "" {
+		sources = append(sources, MultiplexerScreen)
+	}
+	if getenv(KittyWindowIDEnv) != "" {
+		sources = append(sources, MultiplexerKitty)
+	}
+	return sources
+}
+
+// KittyTextCommand builds the argv that reads the plain text of one Kitty
+// window, screen plus scrollback. Only a numeric window id is accepted, so the
+// command can never widen to "every window" or to a path-like target.
+func KittyTextCommand(windowID string) (string, []string, error) {
+	id := strings.TrimSpace(windowID)
+	if !isDigits(id) {
+		return "", nil, fmt.Errorf("%w: got %q", ErrKittyWindowID, windowID)
+	}
+	return "kitten", []string{"@", "get-text", "--match", "id:" + id, "--extent=all"}, nil
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// CaptureKitty reads the current Kitty window through runner. Kitty's answer
+// covers the whole scrollback, so only the newest KittyMaxCaptureBytes are kept
+// in memory and the unbounded response never reaches a temporary file. The
+// window text is plain text, which the existing command/prompt parser reads
+// exactly like pane output.
+func CaptureKitty(windowID string, runner Runner) (string, error) {
+	if runner == nil {
+		return "", ErrNoRunner
+	}
+
+	name, args, err := KittyTextCommand(windowID)
+	if err != nil {
+		return "", err
+	}
+
+	out, err := runner.Output(name, args)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s %s: %v", ErrKittyRemoteControl, name, strings.Join(args, " "), err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", fmt.Errorf("%w: %s returned no text for window %s", ErrNoPaneOutput, name, strings.TrimSpace(windowID))
+	}
+
+	return BoundedTail(out, KittyMaxCaptureBytes), nil
+}
+
+// BoundedTail keeps the newest max bytes of text without splitting a rune.
+func BoundedTail(text string, max int) string {
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+
+	tail := text[len(text)-max:]
+	for len(tail) > 0 && !utf8.ValidString(tail) {
+		tail = tail[1:]
+	}
+	return tail
+}
+
+// CapturePaneFromSources captures from the first candidate that yields a
+// non-empty result and reports which source was used. tmux and screen capture
+// into outPath; Kitty is read from stdout, so a successful multiplexer capture
+// never invokes it. A stale or unusable multiplexer is not fatal: the walk
+// continues to the next available candidate. When nothing succeeds, the error
+// carries every failure so the user can see why each source was rejected.
+func CapturePaneFromSources(sources []string, getenv func(string) string, outPath string, runner Runner) (string, string, error) {
+	if runner == nil {
+		return "", "", ErrNoRunner
+	}
+	if len(sources) == 0 {
+		return "", "", ErrNoMultiplexer
+	}
+
+	var failures []string
+	for _, source := range sources {
+		var (
+			text string
+			err  error
+		)
+
+		if source == MultiplexerKitty {
+			// An absent window id means there is nothing to target, so kitten is
+			// not run at all.
+			windowID := getenv(KittyWindowIDEnv)
+			if strings.TrimSpace(windowID) == "" {
+				continue
+			}
+			text, err = CaptureKitty(windowID, runner)
+		} else {
+			text, err = CapturePane(source, outPath, runner)
+		}
+
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		if strings.TrimSpace(text) == "" {
+			failures = append(failures, fmt.Sprintf("%s: %v", source, ErrNoPaneOutput))
+			continue
+		}
+		return source, text, nil
+	}
+
+	if len(failures) == 0 {
+		return "", "", fmt.Errorf("%w: no usable capture source among %q", ErrNoMultiplexer, sources)
+	}
+	return "", "", fmt.Errorf("terminal: no usable capture source: %s", strings.Join(failures, "; "))
+}
+
 // PaneCommand builds the argv that captures the active pane into outPath. The
 // tmux capture is written to stdout, so the caller redirects it into outPath.
 func PaneCommand(multiplexer string, outPath string) (string, []string, error) {
@@ -181,6 +338,10 @@ func PaneCommand(multiplexer string, outPath string) (string, []string, error) {
 		return "tmux", []string{"capture-pane", "-p", "-S", "-"}, nil
 	case MultiplexerScreen:
 		return "screen", []string{"-X", "hardcopy", "-h", outPath}, nil
+	case MultiplexerKitty:
+		// Kitty has no hardcopy file: its text comes from stdout and only for a
+		// known window id, so it goes through CaptureKitty.
+		return "", nil, fmt.Errorf("%w: kitty capture uses CaptureKitty, not a pane file", ErrUnsupportedMultiplexer)
 	case "":
 		return "", nil, ErrNoMultiplexer
 	default:

@@ -1,5 +1,5 @@
 // Command wut explains the output of the latest terminal command by capturing
-// the active tmux or GNU screen pane.
+// the active tmux or GNU screen pane, falling back to the current Kitty window.
 package main
 
 import (
@@ -35,7 +35,7 @@ Flags:
   --debug             Print debug information.
   --help              Print this help.
 
-wut must be run inside a tmux or screen session.
+wut must be run inside a tmux or screen session, or in a Kitty window.
 `
 
 const configHelp = `No valid LLM provider configuration found.
@@ -55,11 +55,13 @@ type options struct {
 type app struct {
 	getenv     func(string) string
 	loadConfig func() *config.Config
-	capture    func(multiplexer string) (string, error)
-	shell      func() terminal.Shell
-	explain    func(cfg *config.Config, context string, query string) (string, error)
-	stdout     io.Writer
-	stderr     io.Writer
+	// capture walks the available sources in preference order and returns the
+	// source it used along with its text.
+	capture func(sources []string) (string, string, error)
+	shell   func() terminal.Shell
+	explain func(cfg *config.Config, context string, query string) (string, error)
+	stdout  io.Writer
+	stderr  io.Writer
 }
 
 func main() {
@@ -68,8 +70,8 @@ func main() {
 	a := &app{
 		getenv:     os.Getenv,
 		loadConfig: func() *config.Config { return config.Load(os.Getenv) },
-		capture: func(multiplexer string) (string, error) {
-			return capturePane(multiplexer, runner)
+		capture: func(sources []string) (string, string, error) {
+			return capturePane(sources, os.Getenv, runner)
 		},
 		shell: func() terminal.Shell {
 			return detectShell(os.Getenv, runner)
@@ -100,9 +102,12 @@ func (a *app) run(args []string) int {
 		}
 	}
 
-	multiplexer := terminal.DetectMultiplexer(a.getenv)
-	if multiplexer == "" {
-		fmt.Fprintln(a.stderr, "wut must be run inside a tmux or screen session.")
+	// The capture sources are tried in order: tmux, then screen, then the
+	// current Kitty window. Only a missing source is a failure here; a stale or
+	// unusable multiplexer falls through to the next candidate at capture time.
+	sources := terminal.CaptureCandidates(a.getenv)
+	if len(sources) == 0 {
+		fmt.Fprintln(a.stderr, "wut must be run inside a tmux or screen session, or in a Kitty window.")
 		return exitFailure
 	}
 
@@ -121,13 +126,14 @@ func (a *app) run(args []string) int {
 	}
 	debugf("Using LLM provider: %s", cfg.ActiveProvider())
 
-	pane, err := a.capture(multiplexer)
+	source, pane, err := a.capture(sources)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "wut: capturing %s pane: %v\n", multiplexer, err)
+		fmt.Fprintf(a.stderr, "wut: capturing the terminal from %s: %v\n", strings.Join(sources, ", "), err)
 		return exitFailure
 	}
+	debugf("Captured terminal context from %s", source)
 	if strings.TrimSpace(pane) == "" {
-		fmt.Fprintf(a.stderr, "wut: no output captured from the %s pane.\n", multiplexer)
+		fmt.Fprintf(a.stderr, "wut: no output captured from %s.\n", source)
 		return exitFailure
 	}
 
@@ -182,26 +188,44 @@ func detectShellFrom(getenv func(string) string, runner terminal.Runner, startPI
 	return terminal.DetectShellWithTree(getenv, runner, startPID, table.Tree())
 }
 
-// capturePane writes the pane capture to a temporary file and removes it
-// afterwards. The pane is never read from stdin.
-func capturePane(multiplexer string, runner terminal.Runner) (string, error) {
+// capturePane captures from the first source that works, in the order given by
+// the caller, and reports which one answered. tmux and screen write a pane
+// capture to a temporary file that is removed afterwards; the Kitty fallback
+// reads stdout only, so no file is created when it is the only candidate. The
+// pane is never read from stdin.
+func capturePane(sources []string, getenv func(string) string, runner terminal.Runner) (string, string, error) {
+	if !needsCaptureFile(sources) {
+		return terminal.CapturePaneFromSources(sources, getenv, "", runner)
+	}
+
 	dir, err := captureDir()
 	if err != nil {
-		return "", fmt.Errorf("creating capture file: %w", err)
+		return "", "", fmt.Errorf("creating capture file: %w", err)
 	}
 
 	file, err := os.CreateTemp(dir, "wut-pane-*")
 	if err != nil {
-		return "", fmt.Errorf("creating capture file: %w", err)
+		return "", "", fmt.Errorf("creating capture file: %w", err)
 	}
 	path := file.Name()
 	if err := file.Close(); err != nil {
 		os.Remove(path)
-		return "", fmt.Errorf("creating capture file: %w", err)
+		return "", "", fmt.Errorf("creating capture file: %w", err)
 	}
 	defer os.Remove(path)
 
-	return terminal.CapturePane(multiplexer, path, runner)
+	return terminal.CapturePaneFromSources(sources, getenv, path, runner)
+}
+
+// needsCaptureFile reports whether any candidate needs a pane capture file. The
+// Kitty answer can be the whole scrollback, so it is never written to disk.
+func needsCaptureFile(sources []string) bool {
+	for _, source := range sources {
+		if source != terminal.MultiplexerKitty {
+			return true
+		}
+	}
+	return false
 }
 
 // captureDir resolves the directory for pane capture files. The path must be
