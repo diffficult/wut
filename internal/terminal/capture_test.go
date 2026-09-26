@@ -516,13 +516,13 @@ func TestShellPromptCommand(t *testing.T) {
 		wantA []string
 		ok    bool
 	}{
-		{"zsh", "/bin/zsh", "/bin/zsh", []string{"/bin/zsh", "-c", "print -P $PS1"}, true},
+		{"zsh", "/bin/zsh", "/bin/zsh", []string{"-c", "print -P $PS1"}, true},
 		{"bash", "/bin/bash", "echo", []string{`"${PS1@P}"`}, true},
-		{"fish", "/usr/bin/fish", "/usr/bin/fish", []string{"/usr/bin/fish", "fish_prompt"}, true},
-		{"csh", "/bin/csh", "/bin/csh", []string{"/bin/csh", "-c", "echo $prompt"}, true},
-		{"tcsh", "/bin/tcsh", "/bin/tcsh", []string{"/bin/tcsh", "-c", "echo $prompt"}, true},
-		{"pwsh", "/usr/bin/pwsh", "/usr/bin/pwsh", []string{"/usr/bin/pwsh", "-c", "Write-Host $prompt"}, true},
-		{"powershell", "/usr/bin/powershell", "/usr/bin/powershell", []string{"/usr/bin/powershell", "-c", "Write-Host $prompt"}, true},
+		{"fish", "/usr/bin/fish", "/usr/bin/fish", []string{"-c", "fish_prompt"}, true},
+		{"csh", "/bin/csh", "/bin/csh", []string{"-c", "echo $prompt"}, true},
+		{"tcsh", "/bin/tcsh", "/bin/tcsh", []string{"-c", "echo $prompt"}, true},
+		{"pwsh", "/usr/bin/pwsh", "/usr/bin/pwsh", []string{"-c", "Write-Host $prompt"}, true},
+		{"powershell", "/usr/bin/powershell", "/usr/bin/powershell", []string{"-c", "Write-Host $prompt"}, true},
 		{"sh", "/bin/sh", "", nil, false},
 		{"", "", "", nil, false},
 	}
@@ -541,6 +541,13 @@ func TestShellPromptCommand(t *testing.T) {
 			}
 			if strings.Join(gotArgs, "\x00") != strings.Join(tt.wantA, "\x00") {
 				t.Fatalf("ShellPromptCommand(%q) args = %q, want %q", tt.name, gotArgs, tt.wantA)
+			}
+			// argv[0] is already the executable; repeating it makes the shell
+			// parse its own binary as a script.
+			for _, arg := range gotArgs {
+				if arg == gotName {
+					t.Fatalf("ShellPromptCommand(%q) repeats executable %q in args %q", tt.name, gotName, gotArgs)
+				}
 			}
 		})
 	}

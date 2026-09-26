@@ -416,22 +416,26 @@ func contains(haystack []string, needle string) bool {
 }
 
 // ShellPromptCommand builds the argv that prints the shell prompt, reporting
-// false for shells wut cannot interrogate.
+// false for shells wut cannot interrogate. The returned name is argv[0]; the
+// arguments must contain only the shell's own options, never the path again,
+// otherwise the shell parses its own binary as a script.
 func ShellPromptCommand(name string, path string) (string, []string, bool) {
 	switch name {
 	case "zsh":
-		return path, []string{path, "-c", "print -P $PS1"}, true
+		return path, []string{"-c", "print -P $PS1"}, true
 	case "bash":
 		// Parameter transformation; only supported in Bash 4.4+. It is not
 		// expanded here because the probe runs without a shell, so the raw
 		// expansion is reported back and treated as an unknown prompt.
 		return "echo", []string{`"${PS1@P}"`}, true
 	case "fish":
-		return path, []string{path, "fish_prompt"}, true
+		// fish needs -c to evaluate the function as a command; a bare
+		// argument would be treated as a script file.
+		return path, []string{"-c", "fish_prompt"}, true
 	case "csh", "tcsh":
-		return path, []string{path, "-c", "echo $prompt"}, true
+		return path, []string{"-c", "echo $prompt"}, true
 	case "pwsh", "powershell":
-		return path, []string{path, "-c", "Write-Host $prompt"}, true
+		return path, []string{"-c", "Write-Host $prompt"}, true
 	default:
 		return "", nil, false
 	}
