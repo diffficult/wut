@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/diffficult/wut/internal/config"
+	"github.com/diffficult/wut/internal/llm"
 	"github.com/diffficult/wut/internal/terminal"
 )
 
@@ -34,9 +37,10 @@ Flags:
 wut must be run inside a tmux or screen session.
 `
 
-// errProviderNotImplemented is the seam where T2 wires configuration and the
-// LLM providers in.
-var errProviderNotImplemented = errors.New("LLM provider support is not implemented yet (task T2)")
+const configHelp = `No valid LLM provider configuration found.
+Please either:
+  1. Create ~/.config/wut/config with your API keys and models, or
+  2. Set environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_MODEL)`
 
 // options holds the parsed command-line flags.
 type options struct {
@@ -48,19 +52,21 @@ type options struct {
 // app wires the CLI to its environment so every step can be exercised without
 // a live tmux/screen session or provider credentials.
 type app struct {
-	getenv  func(string) string
-	capture func(multiplexer string) (string, error)
-	shell   func() terminal.Shell
-	explain func(context string, query string) (string, error)
-	stdout  io.Writer
-	stderr  io.Writer
+	getenv     func(string) string
+	loadConfig func() *config.Config
+	capture    func(multiplexer string) (string, error)
+	shell      func() terminal.Shell
+	explain    func(cfg *config.Config, context string, query string) (string, error)
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 func main() {
 	runner := terminal.ExecRunner{Stderr: os.Stderr}
 
 	a := &app{
-		getenv: os.Getenv,
+		getenv:     os.Getenv,
+		loadConfig: func() *config.Config { return config.Load(os.Getenv) },
 		capture: func(multiplexer string) (string, error) {
 			return capturePane(multiplexer, runner)
 		},
@@ -99,6 +105,21 @@ func (a *app) run(args []string) int {
 		return exitFailure
 	}
 
+	// The configuration is validated before the pane is captured, so a missing
+	// provider never disturbs the terminal.
+	cfg := a.loadConfig()
+	if cfg == nil {
+		cfg = config.Load(a.getenv)
+	}
+	if cfg.Err() != nil {
+		debugf("Configuration file problem: %v", cfg.Err())
+	}
+	if !cfg.HasValidConfig() {
+		fmt.Fprintln(a.stderr, configHelp)
+		return exitFailure
+	}
+	debugf("Using LLM provider: %s", cfg.ActiveProvider())
+
 	pane, err := a.capture(multiplexer)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "wut: capturing %s pane: %v\n", multiplexer, err)
@@ -116,7 +137,7 @@ func (a *app) run(args []string) int {
 	debugf("Retrieved terminal context:\n%s", context)
 	debugf("Sending request to LLM...")
 
-	response, err := a.explain(context, opts.query)
+	response, err := a.explain(cfg, context, opts.query)
 	if err != nil {
 		fmt.Fprintf(a.stderr, "wut: %v\n", err)
 		return exitFailure
@@ -185,9 +206,11 @@ func captureDir() (string, error) {
 	return dir, nil
 }
 
-// explain returns the provider answer for the given terminal context.
-func explain(context string, query string) (string, error) {
-	return "", errProviderNotImplemented
+// explain returns the provider answer for the given terminal context. The
+// prompts and the provider choice come from the configuration, so the terminal
+// context is built and sent exactly like the Python implementation did.
+func explain(cfg *config.Config, terminalContext string, query string) (string, error) {
+	return llm.NewClient(nil).Explain(context.Background(), cfg, terminalContext, query)
 }
 
 // parseArgs parses wut flags without the flag package's exit-on-error behavior,

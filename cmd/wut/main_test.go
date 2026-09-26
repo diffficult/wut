@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/diffficult/wut/internal/config"
 	"github.com/diffficult/wut/internal/terminal"
 )
 
@@ -20,22 +21,37 @@ type harness struct {
 	gotMultiplexer  []string
 	gotContext      string
 	gotQuery        string
+	gotConfig       *config.Config
 	capturedContext bool
+}
+
+// validConfig is a configuration with one usable provider, which is what the
+// CLI requires before it captures anything.
+func validConfig(t *testing.T) *config.Config {
+	return config.Load(func(key string) string {
+		if key == "OPENAI_API_KEY" {
+			return "k"
+		}
+		return ""
+	}, config.WithPath(filepath.Join(t.TempDir(), "absent")))
 }
 
 func newHarness(t *testing.T, env map[string]string, pane string, captureErr error, explainErr error) *harness {
 	t.Helper()
 
+	cfg := validConfig(t)
 	h := &harness{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 	h.app = &app{
-		shell:  func() terminal.Shell { return terminal.Shell{Path: "/bin/bash", Name: "bash", Prompt: "$ "} },
-		getenv: func(key string) string { return env[key] },
+		shell:      func() terminal.Shell { return terminal.Shell{Path: "/bin/bash", Name: "bash", Prompt: "$ "} },
+		getenv:     func(key string) string { return env[key] },
+		loadConfig: func() *config.Config { return cfg },
 		capture: func(multiplexer string) (string, error) {
 			h.gotMultiplexer = append(h.gotMultiplexer, multiplexer)
 			return pane, captureErr
 		},
-		explain: func(context string, query string) (string, error) {
+		explain: func(cfg *config.Config, context string, query string) (string, error) {
 			h.capturedContext = true
+			h.gotConfig = cfg
 			h.gotContext = context
 			h.gotQuery = query
 			if explainErr != nil {
@@ -51,6 +67,103 @@ func newHarness(t *testing.T, env map[string]string, pane string, captureErr err
 
 func tmuxEnv() map[string]string {
 	return map[string]string{"TMUX": "/tmp/tmux-1000/default,1234,0"}
+}
+
+// The configuration is validated before the pane is captured, so a missing
+// provider never disturbs the terminal.
+func TestRunReportsInvalidConfigBeforeCapturingThePane(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.app.loadConfig = func() *config.Config {
+		return config.Load(func(string) string { return "" }, config.WithPath(filepath.Join(t.TempDir(), "absent")))
+	}
+
+	if code := h.app.run(nil); code != 1 {
+		t.Fatalf("run() = %d, want 1", code)
+	}
+	if len(h.gotMultiplexer) != 0 {
+		t.Fatalf("run() captured %v before validating the config", h.gotMultiplexer)
+	}
+	if h.capturedContext {
+		t.Fatal("run() called the provider without a configured provider")
+	}
+	errOutput := h.stderr.String()
+	for _, want := range []string{"No valid LLM provider configuration found", "~/.config/wut/config", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OLLAMA_MODEL"} {
+		if !strings.Contains(errOutput, want) {
+			t.Fatalf("stderr = %q, want it to mention %q", errOutput, want)
+		}
+	}
+}
+
+func TestRunForwardsTheLoadedConfigToTheProvider(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	cfg := validConfig(t)
+	h.app.loadConfig = func() *config.Config { return cfg }
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if h.gotConfig != cfg {
+		t.Fatal("run() did not hand the loaded configuration to the provider")
+	}
+}
+
+func TestRunAcceptsEnvironmentOnlyConfiguration(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.app.loadConfig = func() *config.Config {
+		return config.Load(func(key string) string {
+			if key == "ANTHROPIC_API_KEY" {
+				return "k"
+			}
+			return ""
+		}, config.WithPath(filepath.Join(t.TempDir(), "absent")))
+	}
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if h.gotConfig.ActiveProvider() != config.ProviderAnthropic {
+		t.Fatalf("provider = %q, want anthropic from the environment", h.gotConfig.ActiveProvider())
+	}
+}
+
+func TestRunReportsAMalformedConfigFileInDebugMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("not an ini file\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.app.loadConfig = func() *config.Config {
+		return config.Load(func(key string) string {
+			if key == "OPENAI_API_KEY" {
+				return "k"
+			}
+			return ""
+		}, config.WithPath(path))
+	}
+
+	if code := h.app.run([]string{"--debug"}); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "Configuration file problem") {
+		t.Fatalf("stdout = %q, want the config failure reported in debug mode", h.stdout.String())
+	}
+}
+
+func TestExplainUsesTheConfiguredProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("[ollama]\nmodel = llama3\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+
+	cfg := config.Load(func(string) string { return "" }, config.WithPath(path))
+
+	if _, err := explain(cfg, "<terminal_history>x</terminal_history>", ""); err == nil {
+		t.Fatal("explain() error = nil, want the unreachable provider to be reported")
+	}
 }
 
 func TestRunOutsideMultiplexer(t *testing.T) {
