@@ -23,6 +23,7 @@ type harness struct {
 	gotQuery        string
 	gotConfig       *config.Config
 	capturedContext bool
+	response        string
 }
 
 // validConfig is a configuration with one usable provider, which is what the
@@ -40,7 +41,7 @@ func newHarness(t *testing.T, env map[string]string, pane string, captureErr err
 	t.Helper()
 
 	cfg := validConfig(t)
-	h := &harness{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
+	h := &harness{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, response: "the answer"}
 	h.app = &app{
 		shell:      func() terminal.Shell { return terminal.Shell{Path: "/bin/bash", Name: "bash", Prompt: "$ "} },
 		getenv:     func(key string) string { return env[key] },
@@ -57,7 +58,7 @@ func newHarness(t *testing.T, env map[string]string, pane string, captureErr err
 			if explainErr != nil {
 				return "", explainErr
 			}
-			return "the answer", nil
+			return h.response, nil
 		},
 		stdout: h.stdout,
 		stderr: h.stderr,
@@ -419,6 +420,186 @@ func TestParseArgs(t *testing.T) {
 				t.Fatalf("parseArgs(%q) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// The provider answers in Markdown, and the terminal is the only place the
+// user sees it: the answer must arrive translated, not as raw markup.
+func TestRunRendersTheMarkdownAnswer(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.response = "**Warning:** git has no `create-pr` command.\n\nRun this:\n\n```sh\ngit push -u origin my-branch\n```\n"
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+
+	out := h.stdout.String()
+	for _, want := range []string{"Warning:", "git has no create-pr command.", "Run this:", "git push -u origin my-branch"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+	for _, unwanted := range []string{"**", "```"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("stdout = %q, want the %q markup translated away", out, unwanted)
+		}
+	}
+}
+
+// A provider that answers with nothing is not a failure.
+func TestRunEmptyAnswerSucceedsAndPrintsNothing(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.response = ""
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0 for an empty answer", code)
+	}
+	if h.stdout.String() != "" {
+		t.Fatalf("stdout = %q, want nothing printed for an empty answer", h.stdout.String())
+	}
+}
+
+// The rendered answer is written without escape sequences when stdout is not a
+// terminal, so piping or redirecting wut stays readable.
+func TestRunPipesPlainTextWhenStdoutIsNotATerminal(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.response = "**bold** answer\n"
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if strings.Contains(h.stdout.String(), "\x1b[") {
+		t.Fatalf("stdout = %q, want no ANSI styling for a non-terminal stdout", h.stdout.String())
+	}
+}
+
+// A rendering failure must never cost the user the answer: the raw response is
+// printed instead of exiting with an error.
+func TestRunFallsBackToTheRawAnswerWhenRenderingFails(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.response = "**bold** answer\n"
+	failing := &failOnceWriter{w: h.stdout}
+	h.app.stdout = failing
+
+	if code := h.app.run(nil); code != 0 {
+		t.Fatalf("run() = %d, want 0 when rendering fails", code)
+	}
+	if !strings.Contains(h.stdout.String(), "**bold** answer") {
+		t.Fatalf("stdout = %q, want the raw provider answer", h.stdout.String())
+	}
+	if !failing.failed {
+		t.Fatal("stdout never received the rendered answer")
+	}
+}
+
+// failOnceWriter rejects the first write and then behaves normally, which is
+// what a broken pipe or a closed terminal looks like mid-render.
+type failOnceWriter struct {
+	w      *bytes.Buffer
+	failed bool
+}
+
+func (f *failOnceWriter) Write(p []byte) (int, error) {
+	if !f.failed {
+		f.failed = true
+		return 0, errors.New("write failed")
+	}
+	return f.w.Write(p)
+}
+
+// The shipped sample configuration is documentation the user copies verbatim,
+// so it must load through the real loader and produce a usable provider. The
+// test lives here because the sample is a user-facing artifact of the command,
+// next to the usage text it documents.
+func TestConfigExampleLoadsAndSelectsAProvider(t *testing.T) {
+	path := filepath.Join("..", "..", "config.example")
+
+	cfg := config.Load(func(string) string { return "" }, config.WithPath(path))
+	if cfg.Err() != nil {
+		t.Fatalf("loading %s: %v", path, cfg.Err())
+	}
+	if !cfg.HasValidConfig() {
+		t.Fatalf("loading %s: no usable provider", path)
+	}
+	if provider := cfg.ActiveProvider(); provider != config.ProviderOpenAI {
+		t.Fatalf("loading %s: provider = %q, want openai from the sample keys", path, provider)
+	}
+
+	providers := cfg.Providers()
+	if providers.OpenAI.Model != config.DefaultOpenAIModel {
+		t.Fatalf("openai model = %q, want the documented default %q", providers.OpenAI.Model, config.DefaultOpenAIModel)
+	}
+	if providers.Anthropic.Model != config.DefaultAnthropicModel {
+		t.Fatalf("anthropic model = %q, want the documented default %q", providers.Anthropic.Model, config.DefaultAnthropicModel)
+	}
+	if providers.OpenAI.BaseURL != "" {
+		t.Fatalf("openai base_url = %q, want it left commented out in the sample", providers.OpenAI.BaseURL)
+	}
+}
+
+// If the answer cannot be written at all, the run failed: reporting success
+// would hide that the user got nothing.
+func TestRunFailsWhenTheAnswerCannotBeWritten(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+	h.response = "**bold** answer\n"
+	h.app.stdout = failingStdoutWriter{}
+
+	if code := h.app.run(nil); code != 1 {
+		t.Fatalf("run() = %d, want 1 when the answer cannot be written", code)
+	}
+	errOutput := h.stderr.String()
+	if !strings.Contains(errOutput, "writing the answer failed") {
+		t.Fatalf("stderr = %q, want the write failure reported", errOutput)
+	}
+	if !strings.Contains(errOutput, "stdout closed") {
+		t.Fatalf("stderr = %q, want the underlying cause", errOutput)
+	}
+}
+
+// failingStdoutWriter rejects every write, the way a closed terminal or a
+// broken pipe does.
+type failingStdoutWriter struct{}
+
+func (failingStdoutWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// The sample configuration is copied verbatim by users, and the INI parser
+// keeps everything after the first "=" or ":" as the value: an inline comment
+// would silently become part of an API endpoint or a model name.
+func TestConfigExampleAvoidsInlineComments(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "config.example"))
+	if err != nil {
+		t.Fatalf("reading config.example: %v", err)
+	}
+
+	for number, raw := range strings.Split(string(contents), "\n") {
+		delimiter := strings.IndexAny(raw, "=:")
+		if delimiter < 0 {
+			continue
+		}
+		if value := raw[delimiter+1:]; strings.ContainsAny(value, "#;") {
+			t.Fatalf("config.example line %d = %q, want a whole-line comment instead of an inline one", number+1, raw)
+		}
+	}
+}
+
+// The build instruction must not write the binary over the Python package
+// directory that still exists in this repository.
+func TestReadmeDocumentsAWorkingGoInstall(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	readme := string(contents)
+
+	for _, want := range []string{"go build -o ./wut-go ./cmd/wut", "./wut-go --help", "go install ./cmd/wut", "tmux", "screen", "--query"} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README.md does not document %q", want)
+		}
+	}
+	for _, unwanted := range []string{"pipx", "-o wut ", `wut "how do i`} {
+		if strings.Contains(readme, unwanted) {
+			t.Fatalf("README.md still contains %q", unwanted)
+		}
 	}
 }
 

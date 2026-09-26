@@ -13,6 +13,7 @@ import (
 
 	"github.com/diffficult/wut/internal/config"
 	"github.com/diffficult/wut/internal/llm"
+	"github.com/diffficult/wut/internal/render"
 	"github.com/diffficult/wut/internal/terminal"
 )
 
@@ -143,7 +144,18 @@ func (a *app) run(args []string) int {
 		return exitFailure
 	}
 
-	fmt.Fprintln(a.stdout, response)
+	// The provider answers in Markdown; a terminal reads the translated form,
+	// not the raw markup, the way the Python implementation printed it through
+	// rich. A rendering failure alone still delivers the answer, because the
+	// raw response is printed instead. If that write fails too, the user got
+	// nothing and the run is a failure, not a success.
+	if err := render.Markdown(a.stdout, response); err != nil {
+		debugf("Rendering the answer as Markdown failed: %v", err)
+		if _, writeErr := fmt.Fprintln(a.stdout, response); writeErr != nil {
+			fmt.Fprintf(a.stderr, "wut: writing the answer failed: %v (rendering failed: %v)\n", writeErr, err)
+			return exitFailure
+		}
+	}
 	return exitOK
 }
 

@@ -1,23 +1,36 @@
 # wut configuration file
 # Copy this file to ~/.config/wut/config and fill in your credentials
+#
+# Every option can also be set with an environment variable named
+# SECTION_KEY in upper case, for example OPENAI_API_KEY or OLLAMA_MODEL.
+# A non-empty value from this file wins over the environment variable.
+# Keep notes on their own line: wut keeps everything after the first "=" or
+# ":" as the value, so an inline comment would become part of the value.
 
 # General settings (optional)
 [general]
 # Explicitly set which provider to use (openai, anthropic, or ollama)
-# If not set, will auto-detect based on available API keys
+# If not set, will auto-detect based on available API keys: openai, then
+# anthropic, then ollama
 # provider = openai
 
 # OpenAI configuration
+# OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL
 [openai]
 api_key = your-openai-api-key-here
 model = gpt-4o
-# base_url = https://api.openai.com/v1  # Optional: custom API endpoint
+# Optional: custom OpenAI-compatible API endpoint, e.g. Azure OpenAI or a proxy.
+# base_url = https://api.openai.com/v1
 
 # Anthropic configuration
+# ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+# The Anthropic endpoint is fixed at https://api.anthropic.com
 [anthropic]
 api_key = your-anthropic-api-key-here
 model = claude-3-5-sonnet-20241022
 
 # Ollama configuration (for local models)
+# OLLAMA_MODEL, and OLLAMA_HOST to point at a non-default host
+# (default: http://localhost:11434)
 [ollama]
 model = llama2
