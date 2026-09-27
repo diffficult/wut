@@ -1,6 +1,9 @@
 # System files
 .DS_Store
 
+# Local generated state
+.codegraph/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
