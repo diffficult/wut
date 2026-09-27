@@ -28,6 +28,7 @@ The repository is a Python CLI that explains the latest command output by captur
 - [x] T3 — Complete Go user-facing output/rendering, update build/install/config docs, and verify Go is fully usable while Python files remain. Completed; commit `8bab3be` (`feat: render Markdown and document Go CLI`).
 - [x] T4 — Remove Python implementation and packaging artifacts (`wut/`, `setup.py`, `Pipfile`, `Pipfile.lock`). Completed; cleanup commit `5d93d4b` (`chore: remove legacy Python implementation`).
 - [x] T5 — Add Kitty scrollback capture as fallback after tmux and screen, with bounded capture, tests, and setup documentation. Completed; commit `6990e58` (`feat: add Kitty scrollback capture fallback`).
+- [x] T6 — Fix shell prompt probe argv construction across supported shells, with tests reproducing the reported zsh errors. Code committed as `e7a2fc7`, installed locally, and user confirmed the live setup works.
 
 ## Acceptance criteria
 - A Go-built `wut` supports current documented query/debug behavior and prefers tmux, then screen; Kitty is used only when neither multiplexer is usable. If a stale mux environment points to a dead/unusable mux, capture failure may fall through to the explicitly identified Kitty window.
@@ -38,6 +39,7 @@ The repository is a Python CLI that explains the latest command output by captur
 - README documents how to build/install/run the Go implementation and accurately describes the tmux/screen requirement.
 - Markdown responses remain readable in a terminal; Go build/install instructions work independently of Python.
 - Kitty capture uses only the current `KITTY_WINDOW_ID`, requests plain `all` scrollback for command+output parsing, and bounds retained data; missing remote-control permission fails clearly without silently reading another window or widening Kitty permissions. Successful tmux/screen capture must never invoke Kitty.
+- Shell prompt probes pass only actual command arguments (not the executable path a second time), so interactive use does not make zsh interpret the shell binary as a script.
 
 ## Verification and progress
 - TDD: strict, user-selected for this feature.
@@ -46,10 +48,11 @@ The repository is a Python CLI that explains the latest command output by captur
 - T3 outcome: commit `8bab3be` (`feat: render Markdown and document Go CLI`). Independent fresh `go test ./... -count=1` passed; install/build instructions were checked statically; T4 writer additionally executed the root binary build/help path.
 - T4 implementation removed the authorized tracked Python sources and packaging files and changed README to the final `go build -o wut` path. Independent verifier passed `go test ./... -count=1`, `go build ./...`, and a `/tmp` binary help smoke test. The root README build target was confirmed available, but the exact root build was not executed to avoid leaving a binary in the repo. `go install` was statically checked, not run. Incident: worker also removed ignored `wut/__pycache__/` despite the scope boundary; user was informed and explicitly chose to continue. It cannot be recovered from Git. Ignored `build/` and `wut_cli.egg-info/` remain untouched. No Go source or pre-existing `.gitignore`/`.codegraph/` was changed.
 - T4 outcome: `5d93d4b` (`chore: remove legacy Python implementation`); independent tests/build/help verification passed. User accepted the accidental removal of ignored Python bytecode cache; ignored build artifacts remain.
-- T5 outcome: commit `6990e58` (`feat: add Kitty scrollback capture fallback`). Independent fresh `go test ./... -count=1` passed across five packages; writer also reports gofmt. Native risk assessment remained unavailable; independent verifier and final spot-check passed. Kitty E2E remains unverified because the agent session had no controlling TTY. The new commit is local and has not been pushed.
-- Original Go rewrite complete and pushed. T5 is a follow-up Kitty backend implementation on the same branch; the earlier push does not authorize pushing this new commit.
+- T5 outcome: commit `6990e58` (`feat: add Kitty scrollback capture fallback`). Independent fresh `go test ./... -count=1` passed across five packages; writer also reports gofmt. Kitty E2E remains unverified because the agent session had no controlling TTY. User subsequently pushed the Kitty commits; `origin/refactor/go` is current through `d76121f`.
+- T6 root cause: `ShellPromptCommand` duplicated the executable path in argv; Go `exec.Command` already supplies argv[0], so zsh tried to parse its own ELF binary as a script. Fixed across zsh/fish/csh/tcsh/pwsh/powershell; Bash behavior unchanged, fish now uses `-c fish_prompt`. Strict TDD updated the existing defective argv test first (RED), then implementation passed focused and full tests. Independent `go test ./... -count=1`, a fresh build/help smoke test, and `/bin/zsh -c 'print -P $PS1'` all passed with no errors; the noninteractive zsh prompt was empty as expected. User subsequently confirmed the live setup works after the fixed binary was installed.
+- T6 code commit: `e7a2fc7` (`fix: correct shell prompt probe arguments`). The fixed Go binary was rebuilt and atomically installed at `/home/rx/.local/bin/wut`; pipx remains uninstalled and `/home/rx/.config/wut/config` was preserved at that time.
 
 ## Route and delivery
-- T1-T5: delegated direct implementation uses bounded workers and separate `gentle-ai-verify` checks for command-running verification.
-- Work-unit commits: explicitly authorized by the user for this feature; T1-T5 commits recorded above. Push authorization covered the earlier Go rewrite only; T5 remains unpushed pending explicit user instruction.
+- T1-T6: delegated direct implementation uses bounded workers and separate `gentle-ai-verify` checks for command-running verification.
+- Work-unit commits: explicitly authorized by the user for this feature; T1-T6 commits recorded above. User explicitly authorized pushing T6 after confirming the live setup works.
 - Forecast: substantial rewrite. User selected separate commits for Go integration/docs and Python cleanup to keep the destructive deletion isolated; no push or PR authorized.
