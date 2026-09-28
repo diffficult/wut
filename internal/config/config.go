@@ -43,6 +43,10 @@ type ProviderConfig struct {
 	APIKey  string
 	Model   string
 	BaseURL string
+	// Session is an optional client session identifier sent to the provider as
+	// a header. OpenAI-compatible gateways such as OpenCode Go reject requests
+	// without one, so it stays empty unless the configuration sets it.
+	Session string
 }
 
 // Providers is the resolved configuration of every supported provider.
@@ -186,6 +190,7 @@ func (c *Config) Providers() Providers {
 			APIKey:  c.Get("openai", "api_key", ""),
 			Model:   c.Get("openai", "model", DefaultOpenAIModel),
 			BaseURL: c.Get("openai", "base_url", ""),
+			Session: c.Get("openai", "session", ""),
 		},
 		Anthropic: ProviderConfig{
 			APIKey: c.Get("anthropic", "api_key", ""),

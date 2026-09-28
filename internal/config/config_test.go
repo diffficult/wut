@@ -244,6 +244,36 @@ func TestEmptySectionValueShadowsTheDefaultSection(t *testing.T) {
 	}
 }
 
+func TestOpenAISessionComesFromTheConfigFile(t *testing.T) {
+	path := writeConfig(t, "[openai]\napi_key = file-key\nsession = file-session\n")
+
+	cfg := Load(env(map[string]string{"OPENAI_SESSION": "env-session"}), WithPath(path))
+
+	if got := cfg.Providers().OpenAI.Session; got != "file-session" {
+		t.Fatalf("openai session = %q, want the file value", got)
+	}
+}
+
+func TestOpenAISessionFallsBackToTheEnvironment(t *testing.T) {
+	path := writeConfig(t, "[openai]\napi_key = file-key\n")
+
+	cfg := Load(env(map[string]string{"OPENAI_SESSION": "env-session"}), WithPath(path))
+
+	if got := cfg.Providers().OpenAI.Session; got != "env-session" {
+		t.Fatalf("openai session = %q, want the environment value", got)
+	}
+}
+
+func TestOpenAISessionIsEmptyWhenUnset(t *testing.T) {
+	path := writeConfig(t, "[openai]\napi_key = file-key\n")
+
+	cfg := Load(env(nil), WithPath(path))
+
+	if got := cfg.Providers().OpenAI.Session; got != "" {
+		t.Fatalf("openai session = %q, want no session so the header is not sent", got)
+	}
+}
+
 func TestInlineCommentsAreNotStripped(t *testing.T) {
 	path := writeConfig(t, "[openai]\napi_key = key # not a comment here\n")
 

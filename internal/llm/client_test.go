@@ -115,6 +115,34 @@ func TestOpenAIRequestShape(t *testing.T) {
 	}
 }
 
+func TestOpenAISendsTheSessionHeaderWhenConfigured(t *testing.T) {
+	client, recorded, closeServer := newServer(t, http.StatusOK,
+		`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	defer closeServer()
+
+	cfg := openAIConfig()
+	cfg.Session = "session-abc"
+	if _, err := client.OpenAI(context.Background(), cfg, ExplainPrompt, "context"); err != nil {
+		t.Fatalf("OpenAI() error = %v", err)
+	}
+	if got := recorded.header.Get(OpenAISessionHeader); got != "session-abc" {
+		t.Fatalf("%s = %q, want the configured session", OpenAISessionHeader, got)
+	}
+}
+
+func TestOpenAIOmitsTheSessionHeaderWhenUnset(t *testing.T) {
+	client, recorded, closeServer := newServer(t, http.StatusOK,
+		`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	defer closeServer()
+
+	if _, err := client.OpenAI(context.Background(), openAIConfig(), ExplainPrompt, "context"); err != nil {
+		t.Fatalf("OpenAI() error = %v", err)
+	}
+	if _, ok := recorded.header[http.CanonicalHeaderKey(OpenAISessionHeader)]; ok {
+		t.Fatalf("%s = %q, want no session header when none is configured", OpenAISessionHeader, recorded.header.Get(OpenAISessionHeader))
+	}
+}
+
 func TestOpenAIHonorsACustomBaseURL(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -32,6 +32,12 @@ const (
 	maxErrorBody = 512
 )
 
+// OpenAISessionHeader is the header OpenCode Go requires on every request: it
+// carries the client session id used for routing and prompt caching. wut sends
+// it only when a session is configured, so other providers see the same
+// requests they always did.
+const OpenAISessionHeader = "x-opencode-session"
+
 // DefaultQuery is the question used when wut runs without --query.
 const DefaultQuery = "Explain the last command's output. Use the previous commands as context, if relevant, but focus on the last command."
 
@@ -181,6 +187,9 @@ func (c *Client) OpenAI(ctx context.Context, cfg config.ProviderConfig, system s
 	headers := map[string]string{}
 	if cfg.APIKey != "" {
 		headers["Authorization"] = "Bearer " + cfg.APIKey
+	}
+	if cfg.Session != "" {
+		headers[OpenAISessionHeader] = cfg.Session
 	}
 
 	var response struct {
