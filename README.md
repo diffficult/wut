@@ -1,84 +1,173 @@
 # wut
 
-**CLI that explains the output of your last command.**
+**Understand the output of your last command, without leaving the terminal.**
 
-> This is a fork of the original [wut-cli](https://github.com/shobrook/wut) with enhanced configuration options.
+[![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](go.mod)
+[![Branch](https://img.shields.io/badge/branch-refactor%2Fgo-blue.svg)](https://github.com/diffficult/wut/tree/refactor/go)
 
-Just type `wut` and an LLM will help you understand whatever's in your terminal. You'll be surprised how useful this can be. It can help you:
-
-- Understand stack traces
-- Decipher error codes
-- Fix incorrect commands
-- Summarize logs
+`wut` reads the active pane of your terminal, finds the command you just ran, and asks an LLM to
+explain what happened. No copy-paste, no second window.
 
 ![Demo](./demo.gif)
 
+> **This is a Go rewrite.** The `refactor/go` branch is a from-scratch Go port of
+> [shobrook/wut](https://github.com/shobrook/wut): same idea, same prompts, a single self-contained
+> binary, and zero third-party modules. `master` still holds the original Python implementation.
+> The Go source, tests, and this README live here.
+
+## Why this fork
+
+- **One binary, no runtime.** No Python, no virtualenv, no Pipenv. Build once, copy anywhere.
+- **Older outputs on demand.** `wut 2` explains the command before the last one, which matters when
+  the newest entry is a failed `wut` run itself.
+- **Real configuration.** A single INI file plus prefixed environment variables, with predictable
+  precedence.
+- **Any OpenAI-compatible endpoint.** OpenAI, Azure, a local server, or
+  [OpenCode Console and Go](#opencode-console-and-opencode-go) through `base_url`.
+- **Terminal-native output.** Markdown is rendered for the terminal; fenced commands come out as
+  indented, copy-ready blocks.
+- **Works where you already are.** tmux, GNU screen, or a plain Kitty window.
+
 ## Requirements
 
-- **A terminal multiplexer: `wut` reads the active `tmux` or GNU `screen` pane. Outside one it prints `wut must be run inside a tmux or screen session, or in a Kitty window.` and exits.** See [Kitty fallback (optional)](#kitty-fallback-optional) for the third, optional capture source.
-- **Go 1.22 or newer** to build the binary. No Python is needed at runtime or at build time.
+- A Unix-like system with **tmux**, **GNU screen**, or **Kitty**. `wut` reads the active tmux/screen
+  pane, or the current Kitty window; outside one of those it prints
+  `wut must be run inside a tmux or screen session, or in a Kitty window.` and exits.
+- An API key for OpenAI, Anthropic, or a reachable OpenAI-compatible endpoint, or a local
+  [Ollama](https://ollama.com) model.
+- **Go 1.22 or newer** to build from source. Nothing else is needed at build time.
+
+## Quick start
+
+```console
+$ git clone -b refactor/go https://github.com/diffficult/wut.git
+$ cd wut
+$ go build -trimpath -ldflags="-s -w" -o wut ./cmd/wut
+$ mkdir -p ~/.local/bin
+$ install -m 0755 wut ~/.local/bin/wut
+$ wut --help
+```
+
+Then put a key in `~/.config/wut/config` (or export one) and run `wut` after any command:
+
+```console
+$ git create-pr
+git: 'create-pr' is not a git command. See 'git --help'.
+$ wut
+```
+
+`~/.local/bin` must be on your `PATH`. If you prefer the Go toolchain to place the binary, install
+it from the clone with `go install ./cmd/wut` (below).
 
 ## Installation
 
-Build the binary from a clone of this repository:
+### Build and install from source
 
-```bash
-> git clone https://github.com/diffficult/wut.git
-> cd wut
-> go build -o wut ./cmd/wut
-> ./wut --help
+```console
+$ git clone -b refactor/go https://github.com/diffficult/wut.git
+$ cd wut
+$ go build -trimpath -ldflags="-s -w" -o wut ./cmd/wut
+$ mkdir -p ~/.local/bin
+$ install -m 0755 wut ~/.local/bin/wut   # or /usr/local/bin, or anywhere on PATH
 ```
 
-This writes a single self-contained `wut` binary into the repository root. Move it anywhere on your `PATH`, or use `go install ./cmd/wut` below.
+`-trimpath` keeps build paths out of the binary and `-ldflags="-s -w"` strips debug symbols; both are
+optional. Drop them for a plain `go build`.
 
-Alternatively install it into `$GOBIN` (which defaults to `$(go env GOPATH)/bin`) so `wut` is on your `PATH`:
+### Install with the Go toolchain
 
-```bash
-> go install ./cmd/wut
+From the clone, `go install` puts the binary in `$(go env GOBIN)` or, when unset,
+`$(go env GOPATH)/bin`:
+
+```console
+$ go install ./cmd/wut
+$ wut --help    # GOBIN or GOPATH/bin must be on PATH
 ```
 
-```bash
-> go build ./...     # compile every package
-> go test ./...      # run the test suite
+### Verify the build
+
+```console
+$ go test ./...
 ```
 
 ## Usage
 
-`wut` must be used inside a `tmux` or `screen` session to capture the last command's output. It also works directly in a [Kitty window](#kitty-fallback-optional) when no multiplexer is present. To use it, just type `wut` after running a command:
+Run a command, then run `wut` in the same pane.
 
-```bash
-> git create-pr
-git: 'create-pr' is not a git command.
-> wut
+### Explain the last command
+
+```console
+$ python app.py
+Traceback (most recent call last):
+  File "app.py", line 3, in <module>
+    import requests
+ModuleNotFoundError: No module named 'requests'
+$ wut
 ```
 
-You'll quickly get a brief explanation of the issue:
+```text
+The traceback means the active Python environment does not have the `requests`
+package installed.
 
+Install it with the interpreter that runs the script:
+
+    python -m pip install requests
+
+If you use a virtualenv, activate it first; `which python` should point inside
+the environment.
 ```
-This error occurs because Git doesn't have a built-in `create-pr` command.
-To create a pull request, you typically need to:
 
-1. Push your branch to the remote repository
-2. Use the GitHub web interface
-```
+### Ask a specific question
 
-If you have a _specific question_ about your last command, pass it with `--query`:
-
-```bash
-> brew install pip
+```console
+$ brew install jq
 ...
-> wut --query "how do i add this to my PATH variable?"
+$ wut --query "where did Homebrew put jq?"
 ```
 
-A bare `wut` always looks at the last command. To reach an older one, pass how far back to count: `wut 2` explains the command before the last, `wut 3` the one before that. This is useful when the newest entry is a `wut` run of its own:
+`--query` still sends the captured terminal context, so the model can answer about the command you
+just ran instead of guessing.
 
-```bash
-> wut
-wut: openai request failed: unexpected status 400
-> wut 2
+### Explain an older output
+
+The newest entry in the pane is often a `wut` run of its own. Pass a number to count back from the
+newest:
+
+```console
+$ wut
+wut: openai request failed: unexpected status 500
+$ wut 2
 ```
 
-All flags are long-form, and there are no other input modes: `wut` never reads stdin or a file, and it never runs or fixes a command for you.
+`wut 2` explains the command before that failed run; `wut 3` the one before that. `wut` and `wut 1`
+are the same thing. Anything newer than the selected command is left out of the context.
+
+### See what is sent
+
+```console
+$ wut 2 --debug
+wut | Using LLM provider: openai
+wut | Captured terminal context from tmux
+wut | Retrieved shell information: {Path:/bin/zsh Name:zsh Prompt:}
+wut | Using output 2, counting back from the newest
+wut | Inferred shell prompt from the pane: "❯❯❯ "
+wut | Retrieved terminal context:
+<terminal_history>
+<previous_commands>
+
+</previous_commands>
+
+<last_command>
+❯❯❯  go test ./...
+--- FAIL: TestParseArgs (0.00s)
+</last_command>
+</terminal_history>
+wut | Sending request to LLM...
+```
+
+### Arguments and flags
 
 | Argument | Description |
 | --- | --- |
@@ -87,83 +176,65 @@ All flags are long-form, and there are no other input modes: `wut` never reads s
 | Flag | Description |
 | --- | --- |
 | `--query <question>` | Ask a specific question about what's on your terminal. |
-| `--debug` | Print debug information: the detected shell, the selected output, the captured terminal context, and the selected provider. |
+| `--debug` | Print the detected shell, the selected output, the captured context, and the provider. Debug lines are held until after the capture so they never pollute the pane. |
 | `--help` | Print the usage text. |
 
-`wut` splits the pane into commands with the shell prompt. When the shell does not report its prompt, `wut` infers it from the pane; with a multi-line prompt the line above the prompt may appear in the captured output.
+All flags are long-form. `wut` never reads stdin or a file, and it never runs or fixes a command for
+you.
 
-Exit codes: `0` on success, `1` on a runtime failure (no capture source, no configuration, failed capture, provider error), `2` on a usage error.
+Exit codes: `0` success, `1` runtime failure (no capture source, no configuration, failed capture,
+provider error), `2` usage error.
 
-### Capture sources
+## How it works
 
-`wut` tries the sources it finds in the environment, in this order, and stops at the first one that returns text:
-
-1. `tmux`, when `TMUX` is set — `tmux capture-pane -p -S -`.
-2. GNU `screen`, when `STY` is set — `screen -X hardcopy -h <file>`.
-3. Kitty, when `KITTY_WINDOW_ID` is set — `kitten @ get-text --match id:<KITTY_WINDOW_ID> --extent=all`.
-
-A successful `tmux` or `screen` capture never invokes Kitty. A stale multiplexer (a `TMUX`/`STY` value left over from a session that is gone) is not fatal: if its capture fails, `wut` continues with the next available source. With `KITTY_WINDOW_ID` unset, Kitty is never invoked at all — `wut` never targets an unspecified or a different window.
-
-Kitty answers with the whole scrollback, so only the newest 256 KiB are kept in memory and used to build the terminal context. That text is plain text, so the same command/prompt parser handles it, and the existing 10k character LLM context cap still applies.
-
-### Kitty fallback (optional)
-
-This is a fallback, not a replacement: `tmux` and `screen` are tried first and behave exactly as before.
-
-How it works, and what it deliberately does not do:
-
-- `wut` reads the current window with `kitten @ get-text --match id:$KITTY_WINDOW_ID --extent=all`. The window id comes from Kitty itself, so `wut` only ever reads the window you are typing in. A missing or non-numeric id is rejected before any command runs.
-- Kitty's [remote control](https://sw.kovidgoyal.net/kitty/remote-control/) is **disabled by default**, and `wut` never changes that: it does not edit your `kitty.conf` and it will not enable permissions for you. Without access, the run fails with the message below instead of reading some other window.
-- Only `get-text` is ever requested. Grant the narrowest permission that makes that one command work, not a blanket `allow_remote_control yes` in your `kitty.conf`. Kitty's config syntax for scoped permissions has changed between releases, so check the [remote control docs](https://sw.kovidgoyal.net/kitty/remote-control/) for your version and confirm the syntax with `kitten @ --help` before relying on it. If your Kitty release only offers the all-or-nothing switch, enabling it is your decision to make explicitly in `kitty.conf`; `wut` only reports the consequence when it is missing.
-- Only the newest 256 KiB of the answer is kept in memory. The full scrollback is never written to a temporary file.
-
-Check whether `kitten` can reach the running instance at all:
-
-```bash
-> kitten @ get-text --match id:$KITTY_WINDOW_ID --extent=all | head
+```text
+tmux / screen / Kitty
+        │
+        ▼
+shell + prompt ──► split commands ──► build <terminal_history>
+                                              │
+                                              ▼
+                    provider (OpenAI / Anthropic / Ollama)
+                                              │
+                                              ▼
+                        Markdown rendered for the terminal
 ```
 
-If that prints your recent window text, `wut` reads exactly the same text:
+1. **Capture.** tmux, then GNU screen, then the current Kitty window. A stale multiplexer is not
+   fatal: `wut` moves on to the next available source.
+2. **Detect the shell and its prompt.** `SHELL`/`TF_SHELL` first, then the process tree via `ps`.
+   If the prompt cannot be obtained (zsh does not export `PS1`, for example), it is inferred from
+   the pane so older outputs can still be selected.
+3. **Split commands.** The pane is divided on prompt lines, newest first, and the running `wut`
+   invocation is dropped.
+4. **Build the context.** The selected command becomes `<last_command>`; older commands become
+   `<previous_commands>`. At most 3 commands and 10,000 characters are sent.
+5. **Ask the provider** and **render the Markdown** answer for the terminal.
 
-```bash
-> echo "wut now works in plain kitty" && wut
+### Project layout
+
+```text
+cmd/wut/            CLI entry point, flag parsing, wiring, usage text
+internal/config/    INI + environment resolution, provider selection
+internal/llm/       OpenAI, Anthropic, and Ollama clients, prompts
+internal/terminal/  tmux/screen/Kitty capture, shell detection, pane parser
+internal/render/    Markdown-to-terminal renderer
 ```
 
-If the permission is missing, `wut` says so instead of guessing:
-
-```
-wut: capturing the terminal from kitty: terminal: no usable capture source: kitty capture failed:
-`kitten` may be missing, or kitty remote control is disabled by default because the narrow
-get-text-only permission was never granted; the window is selected with KITTY_WINDOW_ID,
-see https://github.com/diffficult/wut#kitty-fallback-optional
-```
-
-### How the answer is printed
-
-Providers answer in Markdown. `wut` renders that Markdown for your terminal: headings and bold text become styled text, lists keep their markers, and fenced code blocks are printed as plain indented commands you can copy and re-run. Long lines are not re-wrapped, so a command is never broken in half.
-
-Styling is only applied when the output is a real terminal. When you pipe or redirect `wut`, or set `NO_COLOR=1` (or `TERM=dumb`), the answer is printed as plain text with no escape sequences.
+The test suite follows the same split and runs without a live multiplexer, a provider, or external
+network access.
 
 ## Configuration
 
-You can configure `wut` in two ways: using environment variables or a configuration file.
+Two sources, one precedence rule: a non-empty value in the config file wins, then the environment
+variable, then the default.
 
-### Option 1: Environment Variables
-
-Set the appropriate API key for your preferred LLM provider:
-
-```bash
-> export OPENAI_API_KEY="..."
-> export ANTHROPIC_API_KEY="..."
-```
-
-For local models with Ollama:
+### Environment variables
 
 ```bash
-> export OLLAMA_MODEL="..."
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-4o"
 ```
-
-Every setting has an environment variable named `<SECTION>_<KEY>` in upper case:
 
 | Variable | Used for | Default |
 | --- | --- | --- |
@@ -178,16 +249,23 @@ Every setting has an environment variable named `<SECTION>_<KEY>` in upper case:
 
 The Anthropic endpoint is fixed at `https://api.anthropic.com`.
 
-### Option 2: Configuration File (Recommended)
+### Configuration file
 
-`wut` reads a single INI file at `~/.config/wut/config` (`$HOME/.config/wut/config`):
-
-```bash
-> mkdir -p ~/.config/wut
-> cp config.example ~/.config/wut/config
+```console
+$ mkdir -p ~/.config/wut
+$ cp config.example ~/.config/wut/config
 ```
 
-Then edit `~/.config/wut/config` with your preferences. The file copied above is the annotated reference; it documents every supported key:
+`config.example` documents every supported key. A minimal file:
+
+```ini
+[general]
+provider = openai
+
+[openai]
+api_key = sk-...
+model = gpt-4o
+```
 
 | Section | Key | Meaning | Default |
 | --- | --- | --- | --- |
@@ -202,31 +280,39 @@ Then edit `~/.config/wut/config` with your preferences. The file copied above is
 
 Two rules matter when editing the file:
 
-- Section and key names are case-insensitive, and a value ends at the end of the line. `wut` does **not** strip inline comments, so put notes on their own `#` line instead of after a value.
-- Keep credentials out of the repository: the file lives in your home directory and is yours alone.
+- Section and key names are case-insensitive, and a value ends at the end of the line. `wut` does
+  **not** strip inline comments, so put notes on their own `#` line.
+- Keep credentials out of the repository: the file lives in your home directory.
 
-The configuration file takes precedence over environment variables. A key in the file that is missing or empty falls back to the environment variable of the same name, and then to the default above, so you can keep only the keys you want to override. This allows you to:
+A file that cannot be parsed never aborts the run: values read before the problem are kept and the
+rest falls back to the environment. Run `wut --debug` to see the reported problem.
 
-- Store all your credentials in one place
-- Specify custom OpenAI-compatible API endpoints (e.g., for Azure OpenAI, local models, or other providers)
-- Easily switch between providers
-- Customize model selection per provider
+## Providers
 
-A configuration file that cannot be parsed never aborts the run: the values read before the problem are used and everything else falls back to the environment. Run `wut --debug` to see the reported problem.
-
-## Provider Selection
-
-`wut` automatically detects which LLM provider to use based on available credentials, with the following priority:
+`wut` auto-detects the provider from the available credentials, in this order:
 
 1. OpenAI (if `api_key` is configured)
 2. Anthropic (if `api_key` is configured)
 3. Ollama (if `model` is configured)
 
-You can override this by setting `provider` in the `[general]` section of your config file.
+Set `provider` in `[general]` to override the order.
+
+### Ollama
+
+```ini
+[general]
+provider = ollama
+
+[ollama]
+model = llama3.2
+```
+
+`OLLAMA_HOST` points at a non-default server; the default is `http://localhost:11434`.
 
 ### OpenCode Console and OpenCode Go
 
-Both speak the OpenAI chat completions API, so they are used through the `[openai]` provider with a custom `base_url`. `wut` appends `chat/completions`, so include the API family and version in the base URL:
+Both speak the OpenAI chat completions API, so they use the `[openai]` provider with a custom
+`base_url`. `wut` appends `chat/completions`, so the base URL includes the API family and version:
 
 ```ini
 [general]
@@ -238,7 +324,9 @@ model = kimi-k2.6
 base_url = https://opencode.ai/inference/openai/v1
 ```
 
-[OpenCode Go](https://opencode.ai/docs/go/) is served from `https://opencode.ai/inference/go`, and rejects requests that carry no `x-opencode-session` header with `MissingSessionID`. `wut` always sends that header: it uses the `session` value when one is configured and otherwise generates one per run, so no extra configuration is required:
+[OpenCode Go](https://opencode.ai/docs/go/) is served from `https://opencode.ai/inference/go` and
+rejects requests without an `x-opencode-session` header. `wut` always sends one: the configured
+`session` when present, otherwise an id generated per run.
 
 ```ini
 [openai]
@@ -249,10 +337,102 @@ base_url = https://opencode.ai/inference/go/openai/v1
 # session = 11111111-2222-3333-4444-555555555555
 ```
 
-Pick a model whose Go endpoint is `/chat/completions` (for example `deepseek-v4.1-flash`, `glm-5.3`, `kimi-k2.7-code`). Models served over `/responses` or `/messages` are not reachable through the OpenAI provider.
+Pick a model whose Go endpoint is `/chat/completions` (for example `deepseek-v4.1-flash`, `glm-5.3`,
+`kimi-k2.7-code`). Models served over `/responses` or `/messages` are not reachable through the
+OpenAI provider.
+
+## Capture sources
+
+`wut` tries the sources it finds in the environment, in order, and stops at the first one that
+returns text:
+
+1. **tmux**, when `TMUX` is set: `tmux capture-pane -p -S -`.
+2. **GNU screen**, when `STY` is set: `screen -X hardcopy -h <file>`.
+3. **Kitty**, when `KITTY_WINDOW_ID` is set:
+   `kitten @ get-text --match id:<KITTY_WINDOW_ID> --extent=all`.
+
+A successful tmux or screen capture never invokes Kitty. With `KITTY_WINDOW_ID` unset, Kitty is never
+invoked. Kitty answers with the whole scrollback, so only the newest 256 KiB are kept in memory.
+
+### Kitty fallback (optional)
+
+Kitty's [remote control](https://sw.kovidgoyal.net/kitty/remote-control/) is disabled by default and
+`wut` never enables it. Grant the narrowest permission that makes `get-text` work; the config syntax
+has changed between Kitty releases, so check the docs for your version.
+
+Check whether `kitten` can reach the running instance:
+
+```console
+$ kitten @ get-text --match id:$KITTY_WINDOW_ID --extent=all | head
+```
+
+If that prints recent window text, `wut` reads the same text:
+
+```console
+$ echo "wut now works in plain kitty" && wut
+```
+
+If the permission is missing, `wut` says so instead of reading another window:
+
+```text
+wut: capturing the terminal from kitty: terminal: no usable capture source: kitty capture failed:
+`kitten` may be missing, or kitty remote control is disabled by default because the narrow
+get-text-only permission was never granted; the window is selected with KITTY_WINDOW_ID,
+see https://github.com/diffficult/wut#kitty-fallback-optional
+```
+
+## Output rendering
+
+Providers answer in Markdown. `wut` renders it for the terminal: headings and bold text become
+styled text, lists keep their markers, and fenced code blocks are printed as indented commands you
+can copy and re-run. Long lines are not re-wrapped, so a command is never broken in half.
+
+Styling is only applied when stdout is a real terminal. When you pipe or redirect `wut`, or set
+`NO_COLOR=1` (or `TERM=dumb`), the answer is plain text with no escape sequences.
+
+## Development
+
+```console
+$ go build ./...          # compile every package
+$ go test ./...           # run the whole suite
+$ go vet ./...            # static checks
+$ gofmt -l .              # list files that need formatting (no output = clean)
+```
+
+Run one package or one test:
+
+```console
+$ go test ./internal/terminal
+$ go test ./internal/terminal -run TestBuildContext -v
+```
+
+Cross-compile a release binary:
+
+```console
+$ GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o wut-darwin-arm64 ./cmd/wut
+$ GOOS=linux  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o wut-linux-amd64 ./cmd/wut
+```
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `wut must be run inside a tmux or screen session...` | No `TMUX`, `STY`, or `KITTY_WINDOW_ID` in the environment. Run `wut` in the pane, not from a script outside it. |
+| `No valid LLM provider configuration found` | No usable `[openai] api_key`, `[anthropic] api_key`, or `[ollama] model`. Create `~/.config/wut/config` or export a key. |
+| `cannot reach output N: the terminal shows only M previous command(s)` | The pane does not hold that much scrollback. Scroll further up or pick a smaller number. |
+| `cannot reach output N: the shell prompt could not be determined` | `wut` could not read or infer a prompt, so it cannot split commands. Set a single-line prompt or use `wut` with the default output. |
+| `openai request failed: ... 401` | The key is missing or invalid for the configured `base_url`. |
 
 ## Roadmap
 
-1. [If possible,](https://stackoverflow.com/questions/24283097/reusing-output-from-last-command-in-bash/75629157#75629157) drop the requirement of being inside a tmux or screen session.
-2. Add a `--fix` option to automatically execute a command suggested by `wut`.
+1. [If possible,](https://stackoverflow.com/questions/24283097/reusing-output-from-last-command-in-bash/75629157#75629157)
+   drop the requirement of being inside a tmux or screen session.
+2. Add a `--fix` option to execute a command suggested by `wut`.
 3. Add `wut` to Homebrew.
+
+## Credits and license
+
+Original concept and Python implementation: [Jonathan Shobrook](https://github.com/shobrook/wut).
+Go rewrite and the configuration layer in this fork: [diffficult](https://github.com/diffficult/wut).
+
+[MIT](LICENSE) © 2024 Jonathan Shobrook.
