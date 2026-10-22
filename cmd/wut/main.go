@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/diffficult/wut/internal/config"
@@ -24,11 +25,17 @@ const (
 	exitUsage   = 2
 )
 
-const usage = `wut - understand the output of your latest terminal command.
+const usage = `wut - understand the output of a previous terminal command.
 
 Usage:
-  wut [--query <question>] [--debug]
+  wut [<output>] [--query <question>] [--debug]
   wut --help
+
+Arguments:
+  <output>            Which command output to explain, counting back from the
+                      newest: 1 (the default) is the last command, 2 the one
+                      before it. Use 2 after a failed wut run to reach the
+                      command before it.
 
 Flags:
   --query <question>  Ask a specific question about what's on your terminal.
@@ -46,14 +53,20 @@ Please either:
 // options holds the parsed command-line flags.
 type options struct {
 	query string
-	debug bool
-	help  bool
+	// output is the 1-based position of the command to explain, counting back
+	// from the newest. Zero means the default: the last command.
+	output int
+	debug  bool
+	help   bool
 }
 
 // app wires the CLI to its environment so every step can be exercised without
 // a live tmux/screen session or provider credentials.
 type app struct {
-	getenv     func(string) string
+	getenv func(string) string
+	// invocation is the executable name as the shell typed it, used to locate
+	// the prompt on the captured line that runs wut.
+	invocation string
 	loadConfig func() *config.Config
 	// capture walks the available sources in preference order and returns the
 	// source it used along with its text.
@@ -69,6 +82,7 @@ func main() {
 
 	a := &app{
 		getenv:     os.Getenv,
+		invocation: os.Args[0],
 		loadConfig: func() *config.Config { return config.Load(os.Getenv) },
 		capture: func(sources []string) (string, string, error) {
 			return capturePane(sources, os.Getenv, runner)
@@ -96,11 +110,29 @@ func (a *app) run(args []string) int {
 		return exitOK
 	}
 
+	// Debug lines printed before the pane is captured would land in the
+	// capture, where they would look like command output and break prompt and
+	// command detection. Hold them until the terminal context is taken.
+	var pendingDebug []string
+	captured := false
 	debugf := func(format string, values ...any) {
-		if opts.debug {
-			fmt.Fprintf(a.stdout, "wut | "+format+"\n", values...)
+		if !opts.debug {
+			return
 		}
+		line := fmt.Sprintf("wut | "+format, values...)
+		if !captured {
+			pendingDebug = append(pendingDebug, line)
+			return
+		}
+		fmt.Fprintln(a.stdout, line)
 	}
+	flushDebug := func() {
+		for _, line := range pendingDebug {
+			fmt.Fprintln(a.stdout, line)
+		}
+		pendingDebug = nil
+	}
+	defer flushDebug()
 
 	// The capture sources are tried in order: tmux, then screen, then the
 	// current Kitty window. Only a missing source is a failure here; a stale or
@@ -131,6 +163,8 @@ func (a *app) run(args []string) int {
 		fmt.Fprintf(a.stderr, "wut: capturing the terminal from %s: %v\n", strings.Join(sources, ", "), err)
 		return exitFailure
 	}
+	captured = true
+	flushDebug()
 	debugf("Captured terminal context from %s", source)
 	if strings.TrimSpace(pane) == "" {
 		fmt.Fprintf(a.stderr, "wut: no output captured from %s.\n", source)
@@ -140,7 +174,23 @@ func (a *app) run(args []string) int {
 	shell := a.shell()
 	debugf("Retrieved shell information: %+v", shell)
 
-	context := terminal.BuildContext(pane, shell.Prompt, terminal.MaxCommands, terminal.MaxChars)
+	output := opts.output
+	if output == 0 {
+		output = 1
+	}
+	debugf("Using output %d, counting back from the newest", output)
+
+	prompt := shell.Prompt
+	if prompt == "" && output > 1 {
+		prompt = terminal.InferPrompt(pane, a.invocation)
+		debugf("Inferred shell prompt from the pane: %q", prompt)
+	}
+
+	context, err := terminal.BuildContextAt(pane, prompt, output, terminal.MaxCommands, terminal.MaxChars)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "wut: %v\n", err)
+		return exitFailure
+	}
 	debugf("Retrieved terminal context:\n%s", context)
 	debugf("Sending request to LLM...")
 
@@ -254,6 +304,7 @@ func explain(cfg *config.Config, terminalContext string, query string) (string, 
 // documented long flags are accepted.
 func parseArgs(args []string) (options, error) {
 	var opts options
+	outputSet := false
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -270,10 +321,33 @@ func parseArgs(args []string) (options, error) {
 			opts.debug = true
 		case arg == "--help":
 			opts.help = true
+		case isDigits(arg):
+			if outputSet {
+				return opts, fmt.Errorf("only one output number is allowed")
+			}
+			output, err := strconv.Atoi(arg)
+			if err != nil || output < 1 {
+				return opts, fmt.Errorf("output number must be a positive integer, got %q", arg)
+			}
+			opts.output = output
+			outputSet = true
 		default:
 			return opts, fmt.Errorf("unknown argument %q", arg)
 		}
 	}
 
 	return opts, nil
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, digit := range s {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }

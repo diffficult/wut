@@ -70,13 +70,27 @@ If you have a _specific question_ about your last command, pass it with `--query
 > wut --query "how do i add this to my PATH variable?"
 ```
 
+A bare `wut` always looks at the last command. To reach an older one, pass how far back to count: `wut 2` explains the command before the last, `wut 3` the one before that. This is useful when the newest entry is a `wut` run of its own:
+
+```bash
+> wut
+wut: openai request failed: unexpected status 400
+> wut 2
+```
+
 All flags are long-form, and there are no other input modes: `wut` never reads stdin or a file, and it never runs or fixes a command for you.
+
+| Argument | Description |
+| --- | --- |
+| `[<output>]` | Which command output to explain, counting back from the newest: `1` (the default) is the last command, `2` the one before it. |
 
 | Flag | Description |
 | --- | --- |
 | `--query <question>` | Ask a specific question about what's on your terminal. |
-| `--debug` | Print debug information: the detected shell, the captured terminal context, and the selected provider. |
+| `--debug` | Print debug information: the detected shell, the selected output, the captured terminal context, and the selected provider. |
 | `--help` | Print the usage text. |
+
+`wut` splits the pane into commands with the shell prompt. When the shell does not report its prompt, `wut` infers it from the pane; with a multi-line prompt the line above the prompt may appear in the captured output.
 
 Exit codes: `0` on success, `1` on a runtime failure (no capture source, no configuration, failed capture, provider error), `2` on a usage error.
 

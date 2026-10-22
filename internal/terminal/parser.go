@@ -3,6 +3,7 @@ package terminal
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -172,6 +173,149 @@ func BuildContext(paneOutput string, prompt string, maxCommands int, maxChars in
 		return fmt.Sprintf("<terminal_history>\n%s\n</terminal_history>", TruncatePaneOutput(paneOutput, maxChars))
 	}
 
+	return renderContext(commands, prompt)
+}
+
+// BuildContextAt renders the terminal context ending at the back-th most recent
+// command: 1 is the last command, 2 the one before it, and so on. The selected
+// command becomes the last command of the context and the older ones become its
+// previous commands; anything newer is left out. It fails when the number is
+// below 1, when the shell prompt is unknown and the pane cannot be split, or
+// when the pane shows fewer commands than requested.
+func BuildContextAt(paneOutput string, prompt string, back int, maxCommands int, maxChars int) (string, error) {
+	if back < 1 {
+		return "", fmt.Errorf("output number must be at least 1, got %d", back)
+	}
+	if back == 1 {
+		return BuildContext(paneOutput, prompt, maxCommands, maxChars), nil
+	}
+
+	if strings.TrimSpace(paneOutput) == "" {
+		return "", fmt.Errorf("cannot reach output %d: no terminal output was captured", back)
+	}
+	if prompt == "" {
+		return "", fmt.Errorf("cannot reach output %d: the shell prompt could not be determined", back)
+	}
+
+	commands := GetCommands(paneOutput, prompt)
+	if len(commands) < back {
+		return "", fmt.Errorf("cannot reach output %d: the terminal shows only %d previous command(s)", back, len(commands))
+	}
+
+	commands = TruncateCommands(commands[back-1:], maxCommands, maxChars)
+	if len(commands) == 0 {
+		return "", fmt.Errorf("cannot reach output %d: the command does not fit in the context limit", back)
+	}
+
+	return renderContext(commands, prompt), nil
+}
+
+// InferPrompt derives the shell prompt from the pane when the shell cannot
+// report it. The newest line holds the running wut invocation. When invocation
+// is present in that line, the text before it is the prompt; otherwise the
+// longest common prefix with an older line is cut at the last prompt-like
+// boundary. It returns "" when no prompt can be inferred.
+func InferPrompt(paneOutput string, invocation string) string {
+	var lines []string
+	for _, line := range strings.Split(paneOutput, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, strings.TrimRight(line, "\r"))
+		}
+	}
+	if len(lines) < 2 {
+		return ""
+	}
+
+	newest := lines[len(lines)-1]
+	earlier := lines[:len(lines)-1]
+
+	if prompt, ok := promptFromInvocation(newest, earlier, invocation); ok {
+		return prompt
+	}
+
+	best := ""
+	for _, line := range earlier {
+		if prefix := commonPrefix(newest, line); len(prefix) > len(best) {
+			best = prefix
+		}
+	}
+	return trimToPrompt(best)
+}
+
+// promptFromInvocation returns the text before invocation on the newest line,
+// which is the prompt plus the command word, when that text ends in whitespace
+// and also starts an older line. The older-line check rejects an invocation
+// word that appears inside the command's own arguments.
+func promptFromInvocation(newest string, earlier []string, invocation string) (string, bool) {
+	if invocation == "" {
+		return "", false
+	}
+	index := strings.LastIndex(newest, invocation)
+	if index <= 0 {
+		return "", false
+	}
+
+	candidate := newest[:index]
+	if last := candidate[len(candidate)-1]; last != ' ' && last != '\t' {
+		return "", false
+	}
+	for _, line := range earlier {
+		if strings.HasPrefix(line, candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// trimToPrompt cuts a shared prefix at the boundary that ends the prompt. The
+// last whitespace whose preceding character is not a letter or digit wins, so a
+// repeated "/path/wut" argument does not turn into part of the prompt; when
+// there is no such boundary, the first whitespace is used.
+func trimToPrompt(prefix string) string {
+	firstSpace := -1
+	lastSymbolSpace := -1
+	for i, r := range prefix {
+		if r != ' ' && r != '\t' {
+			continue
+		}
+		if firstSpace < 0 {
+			firstSpace = i
+		}
+		if i == 0 {
+			continue
+		}
+		previous, _ := utf8.DecodeLastRuneInString(prefix[:i])
+		if !unicode.IsLetter(previous) && !unicode.IsDigit(previous) {
+			lastSymbolSpace = i
+		}
+	}
+
+	switch {
+	case lastSymbolSpace >= 0:
+		return prefix[:lastSymbolSpace+1]
+	case firstSpace >= 0:
+		return prefix[:firstSpace+1]
+	default:
+		return ""
+	}
+}
+
+// commonPrefix returns the longest common prefix of a and b.
+func commonPrefix(a string, b string) string {
+	length := len(a)
+	if len(b) < length {
+		length = len(b)
+	}
+	i := 0
+	for i < length && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
+}
+
+// renderContext formats commands, newest first, as the terminal history sent to
+// the provider: the newest command is the last command and the rest are context.
+func renderContext(commands []Command, prompt string) string {
 	reversedCommands := reversed(commands) // Oldest to newest.
 	previous := reversedCommands[:len(reversedCommands)-1]
 	last := reversedCommands[len(reversedCommands)-1]

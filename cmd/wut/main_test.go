@@ -44,6 +44,7 @@ func newHarness(t *testing.T, env map[string]string, pane string, captureErr err
 	cfg := validConfig(t)
 	h := &harness{stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, response: "the answer"}
 	h.app = &app{
+		invocation: "wut",
 		shell:      func() terminal.Shell { return terminal.Shell{Path: "/bin/bash", Name: "bash", Prompt: "$ "} },
 		getenv:     func(key string) string { return env[key] },
 		loadConfig: func() *config.Config { return cfg },
@@ -98,6 +99,56 @@ func TestRunReportsInvalidConfigBeforeCapturingThePane(t *testing.T) {
 		if !strings.Contains(errOutput, want) {
 			t.Fatalf("stderr = %q, want it to mention %q", errOutput, want)
 		}
+	}
+}
+
+func TestRunUsesTheRequestedOlderOutput(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+
+	if code := h.app.run([]string{"2"}); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.gotContext, "$  ls -l") || !strings.Contains(h.gotContext, "total 0") {
+		t.Fatalf("context =\n%s\nwant the command before the last one", h.gotContext)
+	}
+	if strings.Contains(h.gotContext, "cat foo") {
+		t.Fatalf("context =\n%s\nwant the last command left out", h.gotContext)
+	}
+}
+
+func TestRunRejectsAnOutputBeyondThePane(t *testing.T) {
+	h := newHarness(t, tmuxEnv(), samplePane, nil, nil)
+
+	if code := h.app.run([]string{"3"}); code != 1 {
+		t.Fatalf("run() = %d, want 1", code)
+	}
+	if h.capturedContext {
+		t.Fatal("run() called the provider without the requested output")
+	}
+	if !strings.Contains(h.stderr.String(), "only 2 previous command") {
+		t.Fatalf("stderr = %q, want the missing output reported", h.stderr.String())
+	}
+}
+
+func TestRunInfersThePromptWhenTheShellDoesNotReportOne(t *testing.T) {
+	pane := strings.Join([]string{
+		"❯ echo FIRST",
+		"FIRST",
+		"❯ echo SECOND",
+		"SECOND",
+		"❯ wut 2",
+	}, "\n")
+	h := newHarness(t, tmuxEnv(), pane, nil, nil)
+	h.app.shell = func() terminal.Shell { return terminal.Shell{Path: "/bin/zsh", Name: "zsh"} }
+
+	if code := h.app.run([]string{"2"}); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr = %q", code, h.stderr.String())
+	}
+	if !strings.Contains(h.gotContext, "echo FIRST") {
+		t.Fatalf("context =\n%s\nwant the command before the last one", h.gotContext)
+	}
+	if strings.Contains(h.gotContext, "echo SECOND") {
+		t.Fatalf("context =\n%s\nwant the last command left out", h.gotContext)
 	}
 }
 
@@ -481,6 +532,10 @@ func TestParseArgs(t *testing.T) {
 		{name: "undocumented short debug", args: []string{"-d"}, wantErr: `unknown argument "-d"`},
 		{name: "undocumented short help", args: []string{"-h"}, wantErr: `unknown argument "-h"`},
 		{name: "positional argument", args: []string{"why?"}, wantErr: `unknown argument "why?"`},
+		{name: "output number", args: []string{"2"}, want: options{output: 2}},
+		{name: "output number and query", args: []string{"2", "--query", "why?"}, want: options{output: 2, query: "why?"}},
+		{name: "output number zero", args: []string{"0"}, wantErr: "positive integer"},
+		{name: "output number repeated", args: []string{"2", "3"}, wantErr: "only one output number"},
 	}
 
 	for _, tt := range tests {

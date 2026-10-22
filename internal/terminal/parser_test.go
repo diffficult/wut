@@ -252,6 +252,148 @@ func TestBuildContextWithPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildContextAtSelectsAnOlderCommand(t *testing.T) {
+	pane := strings.Join([]string{
+		"user@host:~$ ls -l",
+		"total 0",
+		"user@host:~$ cat foo",
+		"no such file",
+		"user@host:~$ wut",
+		"wut: openai request failed: unexpected status 400",
+		"user@host:~$ wut 2",
+	}, "\n")
+
+	got, err := BuildContextAt(pane, "$ ", 2, 3, 1000)
+	if err != nil {
+		t.Fatalf("BuildContextAt() error = %v", err)
+	}
+
+	want := strings.Join([]string{
+		"<terminal_history>",
+		"<previous_commands>",
+		"$  ls -l",
+		"total 0",
+		"</previous_commands>",
+		"",
+		"<last_command>",
+		"$  cat foo",
+		"no such file",
+		"</last_command>",
+		"</terminal_history>",
+	}, "\n")
+	if got != want {
+		t.Fatalf("BuildContextAt() =\n%s\nwant\n%s", got, want)
+	}
+	if strings.Contains(got, "openai request failed") {
+		t.Fatal("BuildContextAt() included the newer command, which is not context for the selected one")
+	}
+}
+
+func TestBuildContextAtWithTheLastCommandMatchesBuildContext(t *testing.T) {
+	pane := "$ ls\ntotal 0\n$ wut"
+	want := BuildContext(pane, "$ ", 3, 1000)
+
+	got, err := BuildContextAt(pane, "$ ", 1, 3, 1000)
+	if err != nil {
+		t.Fatalf("BuildContextAt() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("BuildContextAt(back=1) =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestBuildContextAtRejectsAnOutputNumberBelowOne(t *testing.T) {
+	if _, err := BuildContextAt("$ ls\n$ wut", "$ ", 0, 3, 1000); err == nil {
+		t.Fatal("BuildContextAt(back=0) error = nil, want a rejection")
+	}
+}
+
+func TestBuildContextAtRejectsAnUnknownPrompt(t *testing.T) {
+	_, err := BuildContextAt("old\nnew\nwut 2", "", 2, 3, 1000)
+	if err == nil || !strings.Contains(err.Error(), "shell prompt") {
+		t.Fatalf("BuildContextAt() error = %v, want a missing-prompt rejection", err)
+	}
+}
+
+func TestBuildContextAtRejectsAnOutputBeyondThePane(t *testing.T) {
+	_, err := BuildContextAt("$ ls\n$ wut 2", "$ ", 2, 3, 1000)
+	if err == nil || !strings.Contains(err.Error(), "only 1 previous command") {
+		t.Fatalf("BuildContextAt() error = %v, want an out-of-range rejection", err)
+	}
+}
+
+func TestInferPromptFromRepeatedCommands(t *testing.T) {
+	pane := strings.Join([]string{
+		"/tmp",
+		"❯ echo FIRST",
+		"FIRST",
+		"",
+		"/tmp",
+		"❯ echo SECOND",
+		"SECOND",
+		"",
+		"/tmp",
+		"❯ wut 2",
+	}, "\n")
+
+	if got := InferPrompt(pane, "wut"); got != "❯ " {
+		t.Fatalf("InferPrompt() = %q, want %q", got, "❯ ")
+	}
+}
+
+func TestInferPromptHandlesARepeatedWutInvocation(t *testing.T) {
+	pane := "❯ wut\nwut: openai request failed\n❯ wut 2"
+	if got := InferPrompt(pane, "wut"); got != "❯ " {
+		t.Fatalf("InferPrompt() = %q, want the prompt without the repeated command", got)
+	}
+}
+
+func TestInferPromptWithAFullPathInvokedTwice(t *testing.T) {
+	pane := strings.Join([]string{
+		"❯❯❯ echo FIRST-COMMAND",
+		"FIRST-COMMAND",
+		"",
+		"❯❯❯ /home/rx/.local/bin/wut --help",
+		"usage",
+		"",
+		"❯❯❯ /home/rx/.local/bin/wut 2 --debug",
+	}, "\n")
+
+	if got := InferPrompt(pane, "/home/rx/.local/bin/wut"); got != "❯❯❯ " {
+		t.Fatalf("InferPrompt() = %q, want %q", got, "❯❯❯ ")
+	}
+}
+
+func TestInferPromptIgnoresTheInvocationInsideAQuery(t *testing.T) {
+	pane := "❯ ls\nfile\n❯ wut --query 'why wut'"
+	if got := InferPrompt(pane, "wut"); got != "❯ " {
+		t.Fatalf("InferPrompt() = %q, want the real prompt", got)
+	}
+}
+
+func TestInferPromptFallsBackWhenTheInvocationIsAnAlias(t *testing.T) {
+	pane := "❯ echo FIRST\nFIRST\n❯ w 2"
+	if got := InferPrompt(pane, "wut"); got != "❯ " {
+		t.Fatalf("InferPrompt() = %q, want the prompt behind the alias", got)
+	}
+}
+
+func TestInferPromptKeepsAClassicPrompt(t *testing.T) {
+	pane := "user@host:~$ ls\nfile\nuser@host:~$ wut 2"
+	if got := InferPrompt(pane, "wut"); got != "user@host:~$ " {
+		t.Fatalf("InferPrompt() = %q, want %q", got, "user@host:~$ ")
+	}
+}
+
+func TestInferPromptWithoutARepeatedPrefix(t *testing.T) {
+	if got := InferPrompt("alpha\nbeta\nwut 2", "wut"); got != "" {
+		t.Fatalf("InferPrompt() = %q, want no prompt", got)
+	}
+	if got := InferPrompt("wut 2", "wut"); got != "" {
+		t.Fatalf("InferPrompt() = %q, want no prompt from a single line", got)
+	}
+}
+
 func TestBuildContextWithSingleCommand(t *testing.T) {
 	got := BuildContext("$ ls\ntotal 0\n$ wut", "$ ", 3, 1000)
 	want := strings.Join([]string{
