@@ -156,7 +156,7 @@ Every setting has an environment variable named `<SECTION>_<KEY>` in upper case:
 | `OPENAI_API_KEY` | OpenAI credential. Required for the OpenAI provider. | none |
 | `OPENAI_MODEL` | OpenAI model. | `gpt-4o` |
 | `OPENAI_BASE_URL` | Custom OpenAI-compatible endpoint (Azure OpenAI, a proxy, a local server). | `https://api.openai.com/v1` |
-| `OPENAI_SESSION` | Client session id sent as the `x-opencode-session` header. Required by OpenCode Go. | none |
+| `OPENAI_SESSION` | Client session id sent as the `x-opencode-session` header. Overrides the generated id. | generated per run |
 | `ANTHROPIC_API_KEY` | Anthropic credential. Required for the Anthropic provider. | none |
 | `ANTHROPIC_MODEL` | Anthropic model. | `claude-3-5-sonnet-20241022` |
 | `OLLAMA_MODEL` | Local Ollama model. Required for the Ollama provider. | none |
@@ -181,7 +181,7 @@ Then edit `~/.config/wut/config` with your preferences. The file copied above is
 | `[openai]` | `api_key` | OpenAI credential. | none |
 | `[openai]` | `model` | OpenAI model. | `gpt-4o` |
 | `[openai]` | `base_url` | Custom OpenAI-compatible endpoint. | `https://api.openai.com/v1` |
-| `[openai]` | `session` | Client session id sent as the `x-opencode-session` header. | none |
+| `[openai]` | `session` | Client session id sent as the `x-opencode-session` header. Overrides the generated id. | generated per run |
 | `[anthropic]` | `api_key` | Anthropic credential. | none |
 | `[anthropic]` | `model` | Anthropic model. | `claude-3-5-sonnet-20241022` |
 | `[ollama]` | `model` | Local Ollama model. | none |
@@ -210,9 +210,9 @@ A configuration file that cannot be parsed never aborts the run: the values read
 
 You can override this by setting `provider` in the `[general]` section of your config file.
 
-### OpenCode Zen and OpenCode Go
+### OpenCode Console and OpenCode Go
 
-Both speak the OpenAI chat completions API, so they are used through the `[openai]` provider with a custom `base_url`:
+Both speak the OpenAI chat completions API, so they are used through the `[openai]` provider with a custom `base_url`. `wut` appends `chat/completions`, so include the API family and version in the base URL:
 
 ```ini
 [general]
@@ -220,21 +220,22 @@ provider = openai
 
 [openai]
 api_key = <your opencode key>
-model = space-bunny-free
-base_url = https://opencode.ai/zen/v1
+model = kimi-k2.6
+base_url = https://opencode.ai/inference/openai/v1
 ```
 
-[OpenCode Go](https://opencode.ai/docs/go/) uses `https://opencode.ai/zen/go/v1` instead, and rejects requests that carry no `x-opencode-session` header with `MissingSessionID`. Set `session` to any stable value and `wut` sends it as that header; without it, a Go base URL fails:
+[OpenCode Go](https://opencode.ai/docs/go/) is served from `https://opencode.ai/inference/go`, and rejects requests that carry no `x-opencode-session` header with `MissingSessionID`. `wut` always sends that header: it uses the `session` value when one is configured and otherwise generates one per run, so no extra configuration is required:
 
 ```ini
 [openai]
 api_key = <your opencode key>
-model = space-bunny-free
-base_url = https://opencode.ai/zen/go/v1
-session = 11111111-2222-3333-4444-555555555555
+model = deepseek-v4.1-flash
+base_url = https://opencode.ai/inference/go/openai/v1
+# Optional: pin the session id instead of generating one per run.
+# session = 11111111-2222-3333-4444-555555555555
 ```
 
-Pick a model whose Go endpoint is `/chat/completions` (for example `space-bunny-free`, `glm-5.3`, `kimi-k3`). Models served over `/responses` or `/messages` are not reachable through the OpenAI provider.
+Pick a model whose Go endpoint is `/chat/completions` (for example `deepseek-v4.1-flash`, `glm-5.3`, `kimi-k2.7-code`). Models served over `/responses` or `/messages` are not reachable through the OpenAI provider.
 
 ## Roadmap
 

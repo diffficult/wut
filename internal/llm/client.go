@@ -7,6 +7,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/diffficult/wut/internal/config"
@@ -33,9 +35,9 @@ const (
 )
 
 // OpenAISessionHeader is the header OpenCode Go requires on every request: it
-// carries the client session id used for routing and prompt caching. wut sends
-// it only when a session is configured, so other providers see the same
-// requests they always did.
+// carries the client session id used for routing and prompt caching. wut always
+// sends it: the configured session when there is one, otherwise an id generated
+// for the process. Other OpenAI-compatible endpoints ignore the header.
 const OpenAISessionHeader = "x-opencode-session"
 
 // DefaultQuery is the question used when wut runs without --query.
@@ -101,6 +103,11 @@ type Client struct {
 	AnthropicVersion string
 	// Getenv reads environment variables such as OLLAMA_HOST.
 	Getenv func(string) string
+
+	// sessionOnce and session hold the id generated when no session is
+	// configured, so every request from one process reuses the same id.
+	sessionOnce sync.Once
+	session     string
 }
 
 // NewClient returns a client with the public provider endpoints. A nil
@@ -188,9 +195,7 @@ func (c *Client) OpenAI(ctx context.Context, cfg config.ProviderConfig, system s
 	if cfg.APIKey != "" {
 		headers["Authorization"] = "Bearer " + cfg.APIKey
 	}
-	if cfg.Session != "" {
-		headers[OpenAISessionHeader] = cfg.Session
-	}
+	headers[OpenAISessionHeader] = c.sessionID(cfg)
 
 	var response struct {
 		Choices []struct {
@@ -205,6 +210,32 @@ func (c *Client) OpenAI(ctx context.Context, cfg config.ProviderConfig, system s
 		return "", errors.New("openai returned no choices")
 	}
 	return response.Choices[0].Message.Content, nil
+}
+
+// sessionID returns the x-opencode-session value: the configured session when
+// present, otherwise an id generated once for the client. OpenCode Go rejects
+// requests without it, and other providers ignore it.
+func (c *Client) sessionID(cfg config.ProviderConfig) string {
+	if cfg.Session != "" {
+		return cfg.Session
+	}
+	c.sessionOnce.Do(func() {
+		c.session = newSessionID()
+	})
+	return c.session
+}
+
+// newSessionID returns a random session id. Any stable value is accepted by
+// OpenCode Go; fall back to a process-and-time value if the system random
+// source is unavailable so a request never goes out without the header.
+func newSessionID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return fmt.Sprintf("ses_%d_%d", os.Getpid(), time.Now().UnixNano())
+	}
+	id[6] = (id[6] & 0x0f) | 0x40 // version 4
+	id[8] = (id[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("ses_%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 }
 
 // Anthropic calls the Anthropic messages endpoint.

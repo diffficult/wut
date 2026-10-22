@@ -130,7 +130,7 @@ func TestOpenAISendsTheSessionHeaderWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestOpenAIOmitsTheSessionHeaderWhenUnset(t *testing.T) {
+func TestOpenAIGeneratesTheSessionHeaderWhenUnset(t *testing.T) {
 	client, recorded, closeServer := newServer(t, http.StatusOK,
 		`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
 	defer closeServer()
@@ -138,8 +138,27 @@ func TestOpenAIOmitsTheSessionHeaderWhenUnset(t *testing.T) {
 	if _, err := client.OpenAI(context.Background(), openAIConfig(), ExplainPrompt, "context"); err != nil {
 		t.Fatalf("OpenAI() error = %v", err)
 	}
-	if _, ok := recorded.header[http.CanonicalHeaderKey(OpenAISessionHeader)]; ok {
-		t.Fatalf("%s = %q, want no session header when none is configured", OpenAISessionHeader, recorded.header.Get(OpenAISessionHeader))
+	first := recorded.header.Get(OpenAISessionHeader)
+	if !strings.HasPrefix(first, "ses_") {
+		t.Fatalf("%s = %q, want a generated session id", OpenAISessionHeader, first)
+	}
+
+	if _, err := client.OpenAI(context.Background(), openAIConfig(), ExplainPrompt, "context"); err != nil {
+		t.Fatalf("OpenAI() error = %v", err)
+	}
+	if got := recorded.header.Get(OpenAISessionHeader); got != first {
+		t.Fatalf("%s = %q, want the same generated session for every request", OpenAISessionHeader, got)
+	}
+
+	other, otherRecorded, closeOther := newServer(t, http.StatusOK,
+		`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	defer closeOther()
+
+	if _, err := other.OpenAI(context.Background(), openAIConfig(), ExplainPrompt, "context"); err != nil {
+		t.Fatalf("OpenAI() error = %v", err)
+	}
+	if got := otherRecorded.header.Get(OpenAISessionHeader); got == first {
+		t.Fatalf("%s = %q, want a session id unique to each client", OpenAISessionHeader, got)
 	}
 }
 

@@ -20,10 +20,11 @@
 api_key = your-openai-api-key-here
 model = gpt-4o
 # Optional: custom OpenAI-compatible API endpoint, e.g. Azure OpenAI, a proxy,
-# or OpenCode Go (https://opencode.ai/zen/go/v1).
+# or OpenCode Go (https://opencode.ai/inference/go/openai/v1).
 # base_url = https://api.openai.com/v1
 # Optional: client session id sent as the x-opencode-session header. Required by
-# OpenCode Go, ignored by other providers. Any stable value works.
+# OpenCode Go, ignored by other providers. When unset, wut generates one per run,
+# so a Go endpoint works without this line.
 # session = 11111111-2222-3333-4444-555555555555
 
 # Anthropic configuration
